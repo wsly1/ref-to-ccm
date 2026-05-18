@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+*.class
+out/
+build/
+dist/
+release/
+no-use/
+*.log
+*.sim~
+*.sim
+.env
+config.yaml

@@ -1,0 +1,39 @@
+fluid:
+  name: R454C
+
+saturation:
+  # type 可选 pressure 或 temperature。
+  type: pressure
+  value: 0.8
+  unit: MPa
+
+gas_table:
+  # pressure 留空时使用饱和压力。
+  pressure:
+  pressure_unit: MPa
+  temperature_start: 30
+  temperature_end: 120
+  temperature_step: 2
+  temperature_unit: C
+  # 可选 cp_table 或 enthalpy_table。
+  specific_heat_source: cp_table
+
+liquid_table:
+  # 可选 saturation 或 table。
+  mode: saturation
+  temperature_start: 0
+  temperature_end: 9
+  temperature_step: 1
+  temperature_unit: C
+
+starccm:
+  sim_file: E:\case\input.sim
+  output_sim_file: E:\case\input_refprop.sim
+  # 必须填写目标 .sim 中已经存在的连续体名称。
+  continuum_name: R454C
+  liquid_phase_name: liquid
+  vapor_phase_name: gas
+  starccm_exe: E:\Program Files\STAR-CCM_202602\starccm_2026\21.02.007-R8\STAR-CCM+21.02.007-R8\star\lib\win64\clang20.1vc14.2-r8\lib\starccm+.exe
+
+output:
+  directory: .\out
