@@ -6,6 +6,7 @@ build/
 dist/
 release/
 no-use/
+temp/
 *.log
 *.sim~
 *.sim
