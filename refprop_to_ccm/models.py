@@ -62,3 +62,30 @@ class LiquidRow:
     equivalent_thermal_conductivity_w_per_m_k: float
     equivalent_dynamic_viscosity_pa_s: float
     enthalpy_j_per_kg: float
+
+
+@dataclass(frozen=True)
+class CoolantRow:
+    temperature_c: float
+    density_kg_per_m3: float
+    specific_heat_j_per_kg_k: float
+    thermal_conductivity_w_per_m_k: float
+    dynamic_viscosity_kg_per_m_s: float
+    mass_fraction: float | None = None
+    volume_fraction: float | None = None
+    freezing_point_c: float | None = None
+    boiling_point_c: float | None = None
+
+
+@dataclass(frozen=True)
+class CoolantCalculation:
+    row: CoolantRow
+    solve_mode: str
+    volume_flow_l_min: float
+    mass_flow_kg_s: float
+    single_plate_mass_flow_kg_s: float
+    inlet_temperature_c: float
+    outlet_temperature_c: float
+    heat_transfer_w: float
+    outlet_direction: str = "heating"
+    plate_count: int = 32

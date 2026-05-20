@@ -10,7 +10,9 @@ from tkinter import filedialog, messagebox, ttk
 
 from .config import ToolConfig
 from .core import generate_outputs, resolve_saturation, validate_gas_temperature_range, validate_liquid_temperature_range
+from .egasp_client import build_coolant_calculation, build_coolant_row
 from .refprop_client import RefpropClient
+from .tables import write_coolant_xlsx
 from .units import k_to_c
 
 
@@ -33,6 +35,10 @@ class RefpropToCcmApp(tk.Tk):
         self.liquid_property_mode = tk.StringVar(value="saturation")
         self.run_star = tk.BooleanVar(value=False)
         self.last_saturation_temperature_c: float | None = None
+        self.coolant_vars: dict[str, tk.StringVar] = {}
+        self.coolant_mode_widgets: dict[str, list[tk.Widget]] = {}
+        self.page_frames: dict[str, ttk.Frame] = {}
+        self.current_page = "home"
 
         self.vars: dict[str, tk.StringVar] = {
             "fluid_name": tk.StringVar(value="R454C"),
@@ -60,13 +66,49 @@ class RefpropToCcmApp(tk.Tk):
         self._wire_validation()
 
     def _build(self) -> None:
-        root = ttk.Frame(self, padding=16)
-        root.pack(fill="both", expand=True)
+        self.container = ttk.Frame(self, padding=16)
+        self.container.pack(fill="both", expand=True)
+        self.container.columnconfigure(0, weight=1)
+        self.container.rowconfigure(0, weight=1)
+
+        self.page_frames["home"] = self._build_home_page()
+        self.page_frames["refprop"] = self._build_refprop_page()
+        self.page_frames["coolant"] = self._build_coolant_page()
+
+        for frame in self.page_frames.values():
+            frame.grid(row=0, column=0, sticky="nsew")
+
+        self._show_home_page()
+
+    def _build_home_page(self) -> ttk.Frame:
+        frame = ttk.Frame(self.container)
+        frame.columnconfigure(0, weight=1)
+
+        content = ttk.Frame(frame, padding=(24, 40))
+        content.grid(row=0, column=0, sticky="n")
+        content.columnconfigure(0, weight=1)
+
+        ttk.Label(content, text="功能选择", font=("", 20, "bold")).grid(row=0, column=0, sticky="w", pady=(0, 12))
+        ttk.Label(content, text="请选择要进入的功能页面。", foreground="#555").grid(row=1, column=0, sticky="w", pady=(0, 24))
+        ttk.Button(content, text="REFPROP 到 STAR-CCM+", command=self._show_refprop_page).grid(
+            row=2, column=0, sticky="ew", pady=6
+        )
+        ttk.Button(content, text="防冻液物性计算", command=self._show_coolant_page).grid(
+            row=3, column=0, sticky="ew", pady=6
+        )
+        return frame
+
+    def _build_refprop_page(self) -> ttk.Frame:
+        root = ttk.Frame(self.container)
         root.columnconfigure(0, weight=1)
         root.columnconfigure(1, weight=1)
-        root.rowconfigure(4, weight=1)
+        root.rowconfigure(5, weight=1)
 
-        fluid_frame = self._section(root, "制冷剂与饱和条件", 0, 0)
+        nav_frame = ttk.Frame(root)
+        nav_frame.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 10))
+        ttk.Button(nav_frame, text="返回主页", command=self._show_home_page).pack(side="left")
+
+        fluid_frame = self._section(root, "制冷剂与饱和条件", 1, 0)
         self._entry(fluid_frame, 0, "制冷剂名称", "fluid_name", "例如 R454C、R134A")
 
         sat_row = ttk.Frame(fluid_frame)
@@ -97,7 +139,7 @@ class RefpropToCcmApp(tk.Tk):
             row=3, column=0, columnspan=3, sticky="w", pady=(2, 6)
         )
 
-        gas_frame = self._section(root, "气态温度相关表", 1, 0)
+        gas_frame = self._section(root, "气态温度相关表", 2, 0)
         self._entry(gas_frame, 0, "温度起点 C", "temp_start", "")
         self._entry(gas_frame, 1, "温度终点 C", "temp_end", "")
         self._entry(gas_frame, 2, "温度步长 C", "temp_step", "")
@@ -161,7 +203,7 @@ class RefpropToCcmApp(tk.Tk):
             entry_widget.grid(row=row, column=1, sticky="ew", pady=4)
             self.liquid_table_widgets.extend([label_widget, entry_widget])
 
-        star_frame = self._section(root, "STAR-CCM+ 项目", 0, 1)
+        star_frame = self._section(root, "STAR-CCM+ 项目", 1, 1)
         self._file_entry(star_frame, 0, "原始 sim 文件", "sim_file", [("STAR-CCM+ sim", "*.sim"), ("All files", "*.*")])
         self._file_entry(star_frame, 1, "另存为 sim 文件", "output_sim_file", [("STAR-CCM+ sim", "*.sim"), ("All files", "*.*")])
         self._entry(star_frame, 2, "目标连续体名称", "continuum_name", "")
@@ -172,21 +214,21 @@ class RefpropToCcmApp(tk.Tk):
             row=6, column=0, columnspan=3, sticky="w", pady=6
         )
 
-        out_frame = self._section(root, "输出", 1, 1)
+        out_frame = self._section(root, "输出", 2, 1)
         self._directory_entry(out_frame, 0, "输出目录", "output_dir")
 
         action_frame = ttk.Frame(root)
-        action_frame.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(14, 10))
-        ttk.Button(action_frame, text="生成物性文件和STAR宏", command=self._start).pack(side="left")
+        action_frame.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(14, 10))
+        ttk.Button(action_frame, text="生成物性文件和 STAR 宏", command=self._start).pack(side="left")
         ttk.Button(action_frame, text="打开输出目录", command=self._open_output_dir).pack(side="left", padx=8)
         ttk.Button(action_frame, text="保存配置", command=self._save_gui_config).pack(side="left", padx=(14, 0))
         ttk.Button(action_frame, text="载入配置", command=self._load_gui_config).pack(side="left", padx=8)
 
         self.status_var = tk.StringVar(value="等待输入")
-        ttk.Label(root, textvariable=self.status_var).grid(row=3, column=0, columnspan=2, sticky="ew", pady=(0, 6))
+        ttk.Label(root, textvariable=self.status_var).grid(row=4, column=0, columnspan=2, sticky="ew", pady=(0, 6))
 
         log_frame = ttk.Frame(root)
-        log_frame.grid(row=4, column=0, columnspan=2, sticky="nsew")
+        log_frame.grid(row=5, column=0, columnspan=2, sticky="nsew")
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(0, weight=1)
         self.log = tk.Text(log_frame, wrap="word", height=16)
@@ -194,6 +236,80 @@ class RefpropToCcmApp(tk.Tk):
         scrollbar = ttk.Scrollbar(log_frame, orient="vertical", command=self.log.yview)
         scrollbar.grid(row=0, column=1, sticky="ns")
         self.log.configure(yscrollcommand=scrollbar.set)
+        return root
+
+    def _build_coolant_page(self) -> ttk.Frame:
+        root = ttk.Frame(self.container)
+        root.columnconfigure(0, weight=1)
+
+        self._init_coolant_vars()
+
+        nav_frame = ttk.Frame(root)
+        nav_frame.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        ttk.Button(nav_frame, text="返回主页", command=self._show_home_page).pack(side="left")
+
+        form_frame = ttk.LabelFrame(root, text="防冻液物性计算", padding=16)
+        form_frame.grid(row=1, column=0, sticky="nsew")
+        form_frame.columnconfigure(1, weight=1)
+
+        self._coolant_entry(form_frame, 0, "物性查询温度 C", "temperature_c")
+        self._coolant_combo(form_frame, 1, "浓度类型", "query_type", ("volume", "mass"))
+        self._coolant_entry(form_frame, 2, "浓度值", "query_value")
+        self._coolant_combo(form_frame, 3, "计算方式", "solve_mode", ("heat", "outlet-temperature", "volume-flow"))
+        self._coolant_entry(form_frame, 4, "体积流量 L/min", "volume_flow_l_min", group="volume_flow")
+        self._coolant_entry(form_frame, 5, "入口温度 C", "inlet_temperature_c")
+        self._coolant_entry(form_frame, 6, "出口温度 C", "outlet_temperature_c", group="outlet_temperature")
+        self._coolant_entry(form_frame, 7, "换热量 W", "heat_transfer_w", group="heat_transfer")
+        self._coolant_combo(form_frame, 8, "出口方向", "outlet_direction", ("heating", "cooling"), group="direction")
+        self._coolant_entry(form_frame, 9, "板片数", "plate_count")
+        self._coolant_output_entry(form_frame, 10, "输出文件", "output_path")
+
+        action_row = ttk.Frame(form_frame)
+        action_row.grid(row=11, column=0, columnspan=3, sticky="ew", pady=(16, 0))
+        ttk.Button(action_row, text="生成防冻液表", command=self._generate_coolant_xlsx).pack(side="left")
+        ttk.Button(action_row, text="打开输出目录", command=self._open_coolant_output_dir).pack(side="left", padx=8)
+
+        ttk.Label(
+            form_frame,
+            text="物性参数固定按“物性查询温度”计算；其余输入随计算方式联动。",
+            foreground="#666",
+        ).grid(row=12, column=0, columnspan=3, sticky="w", pady=(12, 0))
+
+        self.coolant_vars["solve_mode"].trace_add("write", lambda *_: self._sync_coolant_mode_state())
+        self._sync_coolant_mode_state()
+        return root
+
+    def _show_page(self, page_name: str) -> None:
+        self.page_frames[page_name].tkraise()
+        self.current_page = page_name
+
+    def _show_home_page(self) -> None:
+        self._show_page("home")
+
+    def _show_refprop_page(self) -> None:
+        self._show_page("refprop")
+
+    def _show_coolant_page(self) -> None:
+        self._show_page("coolant")
+
+    def _init_coolant_vars(self) -> None:
+        if self.coolant_vars:
+            return
+        output_path = Path(self.vars["output_dir"].get().strip() or "out") / "coolant_properties.xlsx"
+        self.coolant_vars = {
+            "temperature_c": tk.StringVar(value="57"),
+            "query_type": tk.StringVar(value="volume"),
+            "query_value": tk.StringVar(value="0.5"),
+            "solve_mode": tk.StringVar(value="heat"),
+            "volume_flow_l_min": tk.StringVar(value="25"),
+            "inlet_temperature_c": tk.StringVar(value="42"),
+            "outlet_temperature_c": tk.StringVar(value="66.5"),
+            "heat_transfer_w": tk.StringVar(value="36832.8048795"),
+            "outlet_direction": tk.StringVar(value="heating"),
+            "plate_count": tk.StringVar(value="32"),
+            "output_path": tk.StringVar(value=str(output_path)),
+        }
+        self.coolant_mode_widgets = {"volume_flow": [], "outlet_temperature": [], "heat_transfer": [], "direction": []}
 
     def _section(self, parent: ttk.Frame, title: str, row: int, column: int) -> ttk.LabelFrame:
         frame = ttk.LabelFrame(parent, text=title, padding=12)
@@ -430,6 +546,120 @@ class RefpropToCcmApp(tk.Tk):
 
     def _open_output_dir(self) -> None:
         directory = Path(self.vars["output_dir"].get().strip() or "out")
+        directory.mkdir(parents=True, exist_ok=True)
+        os.startfile(directory)
+
+    def _coolant_entry(self, parent: ttk.Frame, row: int, label: str, key: str, group: str | None = None) -> None:
+        label_widget = ttk.Label(parent, text=label)
+        label_widget.grid(row=row, column=0, sticky="w", pady=6)
+        entry_widget = ttk.Entry(parent, textvariable=self.coolant_vars[key])
+        entry_widget.grid(row=row, column=1, sticky="ew", pady=6)
+        if group:
+            self.coolant_mode_widgets[group].extend([label_widget, entry_widget])
+
+    def _coolant_combo(
+        self,
+        parent: ttk.Frame,
+        row: int,
+        label: str,
+        key: str,
+        values: tuple[str, ...],
+        group: str | None = None,
+    ) -> None:
+        label_widget = ttk.Label(parent, text=label)
+        label_widget.grid(row=row, column=0, sticky="w", pady=6)
+        combo_widget = ttk.Combobox(parent, textvariable=self.coolant_vars[key], values=values, state="readonly")
+        combo_widget.grid(row=row, column=1, sticky="ew", pady=6)
+        if group:
+            self.coolant_mode_widgets[group].extend([label_widget, combo_widget])
+
+    def _coolant_output_entry(self, parent: ttk.Frame, row: int, label: str, key: str) -> None:
+        ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", pady=6)
+        ttk.Entry(parent, textvariable=self.coolant_vars[key]).grid(row=row, column=1, sticky="ew", pady=6)
+        ttk.Button(parent, text="浏览", command=self._browse_coolant_output).grid(row=row, column=2, padx=(8, 0))
+
+    def _browse_coolant_output(self) -> None:
+        current = self.coolant_vars.get("output_path")
+        current_path = Path(current.get().strip()) if current and current.get().strip() else Path("out/coolant_properties.xlsx")
+        filename = filedialog.asksaveasfilename(
+            defaultextension=".xlsx",
+            filetypes=[("Excel workbook", "*.xlsx"), ("All files", "*.*")],
+            initialfile=current_path.name,
+            initialdir=str(current_path.parent),
+        )
+        if filename:
+            self.coolant_vars["output_path"].set(filename)
+
+    def _sync_coolant_mode_state(self) -> None:
+        if "solve_mode" not in self.coolant_vars:
+            return
+        solve_mode = self.coolant_vars["solve_mode"].get()
+        enabled_groups = {
+            "heat": {"volume_flow", "outlet_temperature"},
+            "outlet-temperature": {"volume_flow", "heat_transfer", "direction"},
+            "volume-flow": {"outlet_temperature", "heat_transfer"},
+        }.get(solve_mode, {"volume_flow", "outlet_temperature", "heat_transfer", "direction"})
+
+        for group, widgets in self.coolant_mode_widgets.items():
+            enabled = group in enabled_groups
+            for widget in widgets:
+                if isinstance(widget, ttk.Label):
+                    widget.configure(foreground="#000" if enabled else "#777")
+                elif isinstance(widget, ttk.Combobox):
+                    widget.configure(state="readonly" if enabled else "disabled")
+                else:
+                    widget.configure(state="normal" if enabled else "disabled")
+
+    def _generate_coolant_xlsx(self) -> None:
+        try:
+            plate_count = int(_float_value(self.coolant_vars["plate_count"].get(), "板片数"))
+            output_path = Path(self.coolant_vars["output_path"].get().strip() or "out/coolant_properties.xlsx")
+            coolant_row = build_coolant_row(
+                temperature_c=_float_value(self.coolant_vars["temperature_c"].get(), "物性查询温度"),
+                query_type=self.coolant_vars["query_type"].get().strip() or "volume",
+                query_value=_float_value(self.coolant_vars["query_value"].get(), "浓度值"),
+            )
+            calculation = build_coolant_calculation(
+                coolant_row,
+                solve_mode=self.coolant_vars["solve_mode"].get().strip() or "heat",
+                volume_flow_l_min=self._coolant_optional_float("volume_flow_l_min"),
+                inlet_temperature_c=_float_value(self.coolant_vars["inlet_temperature_c"].get(), "入口温度"),
+                outlet_temperature_c=self._coolant_optional_float("outlet_temperature_c"),
+                heat_transfer_w=self._coolant_optional_float("heat_transfer_w"),
+                outlet_direction=self.coolant_vars["outlet_direction"].get().strip() or "heating",
+                plate_count=plate_count,
+            )
+            write_coolant_xlsx(output_path, coolant_row, calculation)
+        except Exception as exc:
+            messagebox.showerror("生成失败", str(exc), parent=self)
+            return
+
+        summary = (
+            f"防冻液参数表已生成: {output_path.resolve()}\n"
+            f"质量流量: {calculation.mass_flow_kg_s:.10g} kg/s\n"
+            f"出口温度: {calculation.outlet_temperature_c:.10g} C\n"
+            f"换热量: {calculation.heat_transfer_w:.10g} W\n"
+            f"体积流量: {calculation.volume_flow_l_min:.10g} L/min"
+        )
+        self.status_var.set("防冻液参数表已生成")
+        self._append_log(summary)
+        messagebox.showinfo("完成", summary, parent=self)
+
+    def _coolant_optional_float(self, key: str) -> float | None:
+        value = self.coolant_vars[key].get().strip()
+        if not value:
+            return None
+        labels = {
+            "volume_flow_l_min": "体积流量",
+            "outlet_temperature_c": "出口温度",
+            "heat_transfer_w": "换热量",
+        }
+        return _float_value(value, labels.get(key, key))
+
+    def _open_coolant_output_dir(self) -> None:
+        if "output_path" not in self.coolant_vars:
+            return
+        directory = Path(self.coolant_vars["output_path"].get().strip() or "out/coolant_properties.xlsx").parent
         directory.mkdir(parents=True, exist_ok=True)
         os.startfile(directory)
 
