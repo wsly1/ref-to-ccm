@@ -15,6 +15,8 @@ from .refprop_client import RefpropClient
 from .tables import write_coolant_xlsx
 from .units import k_to_c
 
+SATURATION_TEMPERATURE_TOLERANCE_C = 1.0e-4
+
 
 DEFAULT_STARCCM_EXE = (
     r"E:\Program Files\STAR-CCM_202602\starccm_2026\21.02.007-R8"
@@ -518,7 +520,7 @@ class RefpropToCcmApp(tk.Tk):
             self.temp_warning_label.configure(foreground="#9a5b00")
             return
 
-        if start_c < sat_c:
+        if start_c < sat_c - SATURATION_TEMPERATURE_TOLERANCE_C:
             self.temp_warning_var.set(f"错误：温度起点 {start_c:.6g} C 不能小于饱和温度 {sat_c:.6g} C。")
             self.temp_warning_label.configure(foreground="#b00020")
         else:

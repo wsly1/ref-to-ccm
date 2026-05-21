@@ -10,6 +10,8 @@ from .starccm import StarCcmRunner, render_macro
 from .tables import write_liquid_csv, write_liquid_json, write_summary_json, write_vapor_csv
 from .units import k_to_c
 
+SATURATION_TEMPERATURE_TOLERANCE_K = 1.0e-4
+
 
 @dataclass(frozen=True)
 class RunResult:
@@ -142,7 +144,7 @@ def resolve_saturation(refprop: RefpropClient, config: ToolConfig):
 def validate_gas_temperature_range(config: ToolConfig, saturation_temperature_k: float) -> None:
     if config.gas_table_mode == "equivalent_quality":
         return
-    if config.gas_temperature_start_k < saturation_temperature_k:
+    if config.gas_temperature_start_k < saturation_temperature_k - SATURATION_TEMPERATURE_TOLERANCE_K:
         raise ValueError(
             "气态温度范围的最小值不能小于饱和温度。"
             f"当前起点为 {config.gas_temperature_start:.6g} C，"
@@ -153,7 +155,7 @@ def validate_gas_temperature_range(config: ToolConfig, saturation_temperature_k:
 def validate_liquid_temperature_range(config: ToolConfig, saturation_temperature_k: float) -> None:
     if config.liquid_property_mode != "table":
         return
-    if config.liquid_temperature_end_k > saturation_temperature_k:
+    if config.liquid_temperature_end_k > saturation_temperature_k + SATURATION_TEMPERATURE_TOLERANCE_K:
         raise ValueError(
             "液态温度表的最高温度不能大于饱和温度。"
             f"当前终点为 {config.liquid_temperature_end:.6g} C，"
