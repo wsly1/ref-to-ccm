@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import math
 import os
 from pathlib import Path
 from typing import Any
 
 from .models import LiquidProperties, LiquidRow, SaturationState, VaporRow
 from .units import k_to_c
+
+ALLOWED_REFPROP_WARNINGS = {-319, -320, -113}
+EPSILON = 1.0e-10
+TEMPERATURE_EPSILON = 1.0e-6
 
 
 class RefpropClient:
@@ -24,6 +29,9 @@ class RefpropClient:
         self.rp = REFPROPFunctionLibrary(str(self.root))
         self.rp.SETPATHdll(str(self.root))
         self.loaded_fluid = ""
+        self.z: list[float] = [1.0]
+        self.last_equivalent_replacement_count = 0
+        self.last_equivalent_quality_points: int | None = None
 
     def load_fluid(self, fluid_name: str, components: list[dict[str, Any]] | None = None) -> None:
         if components:
@@ -99,24 +107,141 @@ class RefpropClient:
         temperature_step_k: float,
     ) -> list[VaporRow]:
         rows: list[VaporRow] = []
-        pressure_kpa = pressure_pa / 1000.0
-        t = temperature_start_k
-        while t <= temperature_end_k + 1.0e-9:
-            flash = self.rp.TPFLSHdll(t, pressure_kpa, self.z)
-            self._check(flash.ierr, flash.herr, f"calculating vapor state for {fluid_name} at {t} K")
-            props = self._properties_td(t, flash.D, self.z)
-            rows.append(
+        for temperature_k in _temperature_points(temperature_start_k, temperature_end_k, temperature_step_k):
+            rows.append(self._vapor_row_tp(fluid_name, pressure_pa, temperature_k))
+        return rows
+
+    def equivalent_vapor_table(
+        self,
+        fluid_name: str,
+        pressure_pa: float,
+        temperature_start_k: float,
+        temperature_end_k: float,
+        temperature_step_k: float,
+        quality_points: int | None,
+        viscosity_model: str,
+    ) -> list[VaporRow]:
+        if quality_points is not None and quality_points < 2:
+            raise ValueError("quality_points must be at least 2 or None for auto.")
+        if viscosity_model not in {"mcadams", "cicchitti"}:
+            raise ValueError("viscosity_model must be mcadams or cicchitti.")
+        if temperature_step_k <= 0.0:
+            raise ValueError("temperature_step_k must be positive.")
+        self.last_equivalent_replacement_count = 0
+        self.last_equivalent_quality_points = quality_points
+
+        bubble_temperature_k = self._refprop_pq(pressure_pa, 0.0, "T")
+        dew_temperature_k = self._refprop_pq(pressure_pa, 1.0, "T")
+        if dew_temperature_k <= bubble_temperature_k + TEMPERATURE_EPSILON:
+            raise ValueError(
+                "equivalent_quality mode requires a finite two-phase temperature glide at the selected pressure."
+            )
+
+        target_temperatures_k = _temperature_points(temperature_start_k, temperature_end_k, temperature_step_k)
+        rows: list[VaporRow | None] = []
+        replacement_temperatures_k: list[float] = []
+        unexpected_failure_temperatures_c: list[float] = []
+        for temperature_k in target_temperatures_k:
+            if bubble_temperature_k - TEMPERATURE_EPSILON <= temperature_k <= dew_temperature_k + TEMPERATURE_EPSILON:
+                rows.append(None)
+                replacement_temperatures_k.append(temperature_k)
+                continue
+            try:
+                rows.append(self._vapor_row_tp(fluid_name, pressure_pa, temperature_k))
+            except Exception:
+                rows.append(None)
+                unexpected_failure_temperatures_c.append(k_to_c(temperature_k))
+
+        if unexpected_failure_temperatures_c:
+            formatted = ", ".join(f"{value:.6g} C" for value in unexpected_failure_temperatures_c)
+            raise RuntimeError(
+                "REFPROP direct table generation failed outside the saturation glide range; "
+                f"RefEquiv can only replace two-phase points. Failed temperatures: {formatted}"
+            )
+        if not replacement_temperatures_k:
+            self.last_equivalent_replacement_count = 0
+            self.last_equivalent_quality_points = quality_points
+            return [row for row in rows if row is not None]
+
+        h_sat_liq_bubble = self._refprop_pq(pressure_pa, 0.0, "H")
+        thermal_conductivity_liq, dynamic_viscosity_liq = self._refprop_pq_outputs(pressure_pa, 0.0, "TCX;VIS")
+        thermal_conductivity_vap, dynamic_viscosity_vap = self._refprop_pq_outputs(pressure_pa, 1.0, "TCX;VIS")
+        cp_liq = self._refprop_pq(pressure_pa, 0.0, "CPLIQ")
+        density_liq = self._refprop_pq(pressure_pa, 0.0, "DLIQ")
+        density_vap = self._refprop_pq(pressure_pa, 1.0, "DVAP")
+
+        effective_quality_points = quality_points or max(len(replacement_temperatures_k), 2)
+        self.last_equivalent_replacement_count = len(replacement_temperatures_k)
+        self.last_equivalent_quality_points = effective_quality_points
+        replacement_samples: list[VaporRow] = []
+        for quality in _linspace(0.0, 1.0, effective_quality_points):
+            actual_temperature_k, enthalpy_j_per_kg, density_kg_per_m3 = self._refprop_pq_outputs(
+                pressure_pa,
+                quality,
+                "T;H;D",
+            )
+            vapor_volume_fraction = _vapor_volume_fraction(quality, density_liq, density_vap)
+            equivalent_thermal_conductivity = _equivalent_thermal_conductivity(
+                thermal_conductivity_liq,
+                thermal_conductivity_vap,
+                vapor_volume_fraction,
+            )
+            equivalent_dynamic_viscosity = _equivalent_viscosity(
+                dynamic_viscosity_liq,
+                dynamic_viscosity_vap,
+                quality,
+                vapor_volume_fraction,
+                viscosity_model,
+            )
+            delta_temperature = actual_temperature_k - bubble_temperature_k
+            if delta_temperature <= TEMPERATURE_EPSILON:
+                equivalent_cp = cp_liq
+            else:
+                equivalent_cp = (enthalpy_j_per_kg - h_sat_liq_bubble) / delta_temperature
+
+            replacement_samples.append(
                 VaporRow(
-                    temperature_c=k_to_c(t),
-                    density_kg_per_m3=props["density"],
-                    equivalent_specific_heat_j_per_kg_k=props["cp"],
-                    equivalent_thermal_conductivity_w_per_m_k=props["thermal_conductivity"],
-                    equivalent_dynamic_viscosity_pa_s=props["dynamic_viscosity"],
-                    enthalpy_j_per_kg=props["enthalpy"],
+                    temperature_c=k_to_c(actual_temperature_k),
+                    density_kg_per_m3=density_kg_per_m3,
+                    equivalent_specific_heat_j_per_kg_k=equivalent_cp,
+                    equivalent_thermal_conductivity_w_per_m_k=equivalent_thermal_conductivity,
+                    equivalent_dynamic_viscosity_pa_s=equivalent_dynamic_viscosity,
+                    enthalpy_j_per_kg=enthalpy_j_per_kg,
                 )
             )
-            t += temperature_step_k
-        return rows
+
+        merged_rows: list[VaporRow] = []
+        for temperature_k, row in zip(target_temperatures_k, rows):
+            if row is not None:
+                merged_rows.append(row)
+            else:
+                merged_rows.append(_interpolate_vapor_row(k_to_c(temperature_k), replacement_samples))
+        return merged_rows
+
+    def _quality_for_temperature(
+        self,
+        pressure_pa: float,
+        target_temperature_k: float,
+        bubble_temperature_k: float,
+        dew_temperature_k: float,
+    ) -> float:
+        if target_temperature_k <= bubble_temperature_k + TEMPERATURE_EPSILON:
+            return 0.0
+        if target_temperature_k >= dew_temperature_k - TEMPERATURE_EPSILON:
+            return 1.0
+
+        low_quality = 0.0
+        high_quality = 1.0
+        for _ in range(80):
+            mid_quality = (low_quality + high_quality) / 2.0
+            mid_temperature_k = self._refprop_pq(pressure_pa, mid_quality, "T")
+            if abs(mid_temperature_k - target_temperature_k) <= TEMPERATURE_EPSILON:
+                return mid_quality
+            if mid_temperature_k < target_temperature_k:
+                low_quality = mid_quality
+            else:
+                high_quality = mid_quality
+        return (low_quality + high_quality) / 2.0
 
     def liquid_table(
         self,
@@ -146,6 +271,20 @@ class RefpropClient:
             t += temperature_step_k
         return rows
 
+    def _vapor_row_tp(self, fluid_name: str, pressure_pa: float, temperature_k: float) -> VaporRow:
+        pressure_kpa = pressure_pa / 1000.0
+        flash = self.rp.TPFLSHdll(temperature_k, pressure_kpa, self.z)
+        self._check(flash.ierr, flash.herr, f"calculating vapor state for {fluid_name} at {temperature_k} K")
+        props = self._properties_td(temperature_k, flash.D, self.z)
+        return VaporRow(
+            temperature_c=k_to_c(temperature_k),
+            density_kg_per_m3=props["density"],
+            equivalent_specific_heat_j_per_kg_k=props["cp"],
+            equivalent_thermal_conductivity_w_per_m_k=props["thermal_conductivity"],
+            equivalent_dynamic_viscosity_pa_s=props["dynamic_viscosity"],
+            enthalpy_j_per_kg=props["enthalpy"],
+        )
+
     def _properties_td(
         self,
         temperature_k: float,
@@ -166,8 +305,31 @@ class RefpropClient:
             "molecular_weight": molecular_weight,
         }
 
+    def _refprop_pq(self, pressure_pa: float, quality: float, output: str) -> float:
+        return self._refprop_pq_outputs(pressure_pa, quality, output)[0]
+
+    def _refprop_pq_outputs(self, pressure_pa: float, quality: float, outputs: str) -> tuple[float, ...]:
+        result = self.rp.REFPROPdll(
+            self.loaded_fluid,
+            "PQ",
+            outputs,
+            self.rp.MASS_BASE_SI,
+            0,
+            0,
+            pressure_pa,
+            quality,
+            self.z,
+        )
+        self._check(result.ierr, result.herr, f"calculating PQ state ({outputs}) at P={pressure_pa} Pa, Q={quality}")
+        values = tuple(float(result.Output[index]) for index in range(len(outputs.split(";"))))
+        if any(math.isnan(value) for value in values):
+            raise RuntimeError(f"REFPROP returned NaN while calculating PQ state ({outputs})")
+        return values
+
     @staticmethod
     def _check(ierr: int, herr: str, action: str) -> None:
+        if ierr in ALLOWED_REFPROP_WARNINGS:
+            return
         if ierr != 0:
             raise RuntimeError(f"REFPROP error while {action}: {ierr} {herr}")
 
@@ -177,3 +339,132 @@ def _as_fld_name(name: str) -> str:
     if upper.endswith(".FLD"):
         return upper
     return upper + ".FLD"
+
+
+def _equivalent_thermal_conductivity(
+    thermal_conductivity_liq: float,
+    thermal_conductivity_vap: float,
+    vapor_volume_fraction: float,
+) -> float:
+    if vapor_volume_fraction <= EPSILON:
+        return thermal_conductivity_liq
+    if vapor_volume_fraction >= 1.0 - EPSILON:
+        return thermal_conductivity_vap
+
+    a = 1.0
+    b = (
+        2.0 * (1.0 - vapor_volume_fraction) * thermal_conductivity_vap
+        - (1.0 - vapor_volume_fraction) * thermal_conductivity_liq
+        + 2.0 * vapor_volume_fraction * thermal_conductivity_liq
+        - vapor_volume_fraction * thermal_conductivity_vap
+    )
+    c = -2.0 * thermal_conductivity_liq * thermal_conductivity_vap
+    discriminant = b * b - 4.0 * a * c
+    root = math.sqrt(discriminant)
+    candidate_1 = (-b + root) / (2.0 * a)
+    candidate_2 = (-b - root) / (2.0 * a)
+    lower = min(thermal_conductivity_liq, thermal_conductivity_vap) - EPSILON
+    upper = max(thermal_conductivity_liq, thermal_conductivity_vap) + EPSILON
+    if lower <= candidate_1 <= upper:
+        return candidate_1
+    return candidate_2
+
+
+def _equivalent_viscosity(
+    dynamic_viscosity_liq: float,
+    dynamic_viscosity_vap: float,
+    quality: float,
+    vapor_volume_fraction: float,
+    model: str,
+) -> float:
+    if quality <= EPSILON:
+        return dynamic_viscosity_liq
+    if quality >= 1.0 - EPSILON:
+        return dynamic_viscosity_vap
+    if model == "mcadams":
+        return 1.0 / ((1.0 - quality) / dynamic_viscosity_liq + quality / dynamic_viscosity_vap)
+    if model == "cicchitti":
+        return (1.0 - vapor_volume_fraction) * dynamic_viscosity_liq + vapor_volume_fraction * dynamic_viscosity_vap
+    raise ValueError(f"Unsupported viscosity model: {model}")
+
+
+def _vapor_volume_fraction(quality: float, density_liq: float, density_vap: float) -> float:
+    if quality <= EPSILON:
+        return 0.0
+    if quality >= 1.0 - EPSILON:
+        return 1.0
+    specific_volume_liq = 1.0 / density_liq
+    specific_volume_vap = 1.0 / density_vap
+    mixture_specific_volume = (1.0 - quality) * specific_volume_liq + quality * specific_volume_vap
+    return quality * specific_volume_vap / mixture_specific_volume
+
+
+def _linspace(start: float, end: float, count: int) -> list[float]:
+    if count == 1:
+        return [start]
+    step = (end - start) / float(count - 1)
+    return [start + step * index for index in range(count)]
+
+
+def _temperature_points(start_k: float, end_k: float, step_k: float) -> list[float]:
+    points = []
+    temperature_k = start_k
+    while temperature_k <= end_k + TEMPERATURE_EPSILON:
+        points.append(temperature_k)
+        temperature_k += step_k
+    if not points or points[-1] < end_k - TEMPERATURE_EPSILON:
+        points.append(end_k)
+    return points
+
+
+def _interpolate_vapor_row(temperature_c: float, rows: list[VaporRow]) -> VaporRow:
+    if not rows:
+        raise RuntimeError("No RefEquiv replacement rows were generated.")
+    ordered = sorted(rows, key=lambda row: row.temperature_c)
+    if temperature_c <= ordered[0].temperature_c + TEMPERATURE_EPSILON:
+        return _vapor_row_at_temperature(temperature_c, ordered[0])
+    if temperature_c >= ordered[-1].temperature_c - TEMPERATURE_EPSILON:
+        return _vapor_row_at_temperature(temperature_c, ordered[-1])
+
+    for lower, upper in zip(ordered, ordered[1:]):
+        if lower.temperature_c <= temperature_c <= upper.temperature_c:
+            span = upper.temperature_c - lower.temperature_c
+            if abs(span) <= TEMPERATURE_EPSILON:
+                return _vapor_row_at_temperature(temperature_c, lower)
+            ratio = (temperature_c - lower.temperature_c) / span
+            return VaporRow(
+                temperature_c=temperature_c,
+                density_kg_per_m3=_lerp(lower.density_kg_per_m3, upper.density_kg_per_m3, ratio),
+                equivalent_specific_heat_j_per_kg_k=_lerp(
+                    lower.equivalent_specific_heat_j_per_kg_k,
+                    upper.equivalent_specific_heat_j_per_kg_k,
+                    ratio,
+                ),
+                equivalent_thermal_conductivity_w_per_m_k=_lerp(
+                    lower.equivalent_thermal_conductivity_w_per_m_k,
+                    upper.equivalent_thermal_conductivity_w_per_m_k,
+                    ratio,
+                ),
+                equivalent_dynamic_viscosity_pa_s=_lerp(
+                    lower.equivalent_dynamic_viscosity_pa_s,
+                    upper.equivalent_dynamic_viscosity_pa_s,
+                    ratio,
+                ),
+                enthalpy_j_per_kg=_lerp(lower.enthalpy_j_per_kg, upper.enthalpy_j_per_kg, ratio),
+            )
+    raise RuntimeError(f"Could not interpolate RefEquiv replacement row at {temperature_c:.6g} C.")
+
+
+def _vapor_row_at_temperature(temperature_c: float, row: VaporRow) -> VaporRow:
+    return VaporRow(
+        temperature_c=temperature_c,
+        density_kg_per_m3=row.density_kg_per_m3,
+        equivalent_specific_heat_j_per_kg_k=row.equivalent_specific_heat_j_per_kg_k,
+        equivalent_thermal_conductivity_w_per_m_k=row.equivalent_thermal_conductivity_w_per_m_k,
+        equivalent_dynamic_viscosity_pa_s=row.equivalent_dynamic_viscosity_pa_s,
+        enthalpy_j_per_kg=row.enthalpy_j_per_kg,
+    )
+
+
+def _lerp(start: float, end: float, ratio: float) -> float:
+    return start + (end - start) * ratio

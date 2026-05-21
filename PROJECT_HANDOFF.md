@@ -19,9 +19,13 @@
 本项目现在包含两个主要功能：
 
 1. REFPROP 到 STAR-CCM+
-   - 从 GUI 或 YAML 配置读取制冷剂、饱和条件、温度表范围和 STAR-CCM+ 项目信息。
+   - 从 GUI 或 YAML 配置读取制冷剂、饱和条件、气相表模式、液相属性方式和 STAR-CCM+ 项目信息。
    - 调用 REFPROP 生成液相/气相物性输出和 STAR-CCM+ Java 宏。
    - 可选调用 STAR-CCM+ 批处理执行宏。
+   - 气相表支持两种模式：
+     - `temperature`：原有固定压力温度表，要求气相温度起点不小于饱和温度。
+     - `equivalent_quality`：先按配置的温度起点、终点和步长生成同一套温度点；落在泡点到露点滑移区、也就是容易出现 `#VALUE!` 的温度点，参考 `RefEquiv`，用 REFPROP `PQ` 干度路径生成等效数据替代；滑移区外仍使用直接 REFPROP。
+   - GUI 计算饱和温度后，会把气相温度起点默认填为饱和温度上方 `0.001 C`；液态选择“按温度表填”时，液态温度终点默认填为饱和温度下方 `0.001 C`，避免表格默认点正好落在气液边界。气液温度步长默认 `0.1 C`，可手动改。
 
 2. 防冻液物性计算
    - 使用本地最小 EGASP 数据源计算乙二醇水溶液防冻液物性。
@@ -179,6 +183,14 @@ REFPROP 输出检查：
 ```powershell
 python -m refprop_to_ccm --config .\examples\config.r454c.yaml --no-run-star
 ```
+
+RefEquiv 等效干度模式检查：
+
+```powershell
+python -m refprop_to_ccm --config .\examples\config.r454c.yaml --no-run-star
+```
+
+运行前把 `examples\config.r454c.yaml` 中 `gas_table.mode` 改为 `equivalent_quality`；该模式仍使用气相温度起点、终点和步长，泡点到露点之间的温度点由 RefEquiv 等效数据替代。`quality_points: auto` 表示按替代温度点数量自动决定，也可以手动填整数。
 
 ## 9. 提交前清理
 

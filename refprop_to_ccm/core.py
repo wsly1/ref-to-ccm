@@ -41,13 +41,26 @@ def generate_outputs(config: ToolConfig, run_star: bool = False) -> RunResult:
     if gas_pressure_pa is None:
         gas_pressure_pa = saturation.pressure_pa
 
-    vapor_rows = refprop.vapor_table(
-        fluid_name=config.fluid_name,
-        pressure_pa=gas_pressure_pa,
-        temperature_start_k=config.gas_temperature_start_k,
-        temperature_end_k=config.gas_temperature_end_k,
-        temperature_step_k=config.gas_temperature_step_k,
-    )
+    if config.gas_table_mode == "temperature":
+        vapor_rows = refprop.vapor_table(
+            fluid_name=config.fluid_name,
+            pressure_pa=gas_pressure_pa,
+            temperature_start_k=config.gas_temperature_start_k,
+            temperature_end_k=config.gas_temperature_end_k,
+            temperature_step_k=config.gas_temperature_step_k,
+        )
+    elif config.gas_table_mode == "equivalent_quality":
+        vapor_rows = refprop.equivalent_vapor_table(
+            fluid_name=config.fluid_name,
+            pressure_pa=gas_pressure_pa,
+            temperature_start_k=config.gas_temperature_start_k,
+            temperature_end_k=config.gas_temperature_end_k,
+            temperature_step_k=config.gas_temperature_step_k,
+            quality_points=config.quality_points,
+            viscosity_model=config.viscosity_model,
+        )
+    else:
+        raise ValueError(f"Unsupported gas table mode: {config.gas_table_mode}")
 
     liquid_rows = None
     if config.liquid_property_mode == "table":
@@ -74,6 +87,9 @@ def generate_outputs(config: ToolConfig, run_star: bool = False) -> RunResult:
         "fluid": config.fluid_name,
         "saturation": saturation.to_json(),
         "gas_table_pressure_pa": gas_pressure_pa,
+        "gas_table_mode": config.gas_table_mode,
+        "gas_equivalent_replacement_points": refprop.last_equivalent_replacement_count,
+        "gas_equivalent_quality_points_used": refprop.last_equivalent_quality_points,
         "liquid_table_pressure_pa": saturation.pressure_pa if liquid_rows is not None else None,
         "liquid_properties": str(liquid_json.resolve()),
         "liquid_property_table": str(liquid_csv.resolve()) if liquid_rows is not None else None,
@@ -124,9 +140,11 @@ def resolve_saturation(refprop: RefpropClient, config: ToolConfig):
 
 
 def validate_gas_temperature_range(config: ToolConfig, saturation_temperature_k: float) -> None:
-    if config.gas_temperature_start_k <= saturation_temperature_k:
+    if config.gas_table_mode == "equivalent_quality":
+        return
+    if config.gas_temperature_start_k < saturation_temperature_k:
         raise ValueError(
-            "气态温度范围的最小值必须大于饱和温度。"
+            "气态温度范围的最小值不能小于饱和温度。"
             f"当前起点为 {config.gas_temperature_start:.6g} C，"
             f"饱和温度为 {k_to_c(saturation_temperature_k):.6g} C。"
         )
@@ -135,9 +153,9 @@ def validate_gas_temperature_range(config: ToolConfig, saturation_temperature_k:
 def validate_liquid_temperature_range(config: ToolConfig, saturation_temperature_k: float) -> None:
     if config.liquid_property_mode != "table":
         return
-    if config.liquid_temperature_end_k >= saturation_temperature_k:
+    if config.liquid_temperature_end_k > saturation_temperature_k:
         raise ValueError(
-            "液态温度表的最高温度必须小于饱和温度。"
+            "液态温度表的最高温度不能大于饱和温度。"
             f"当前终点为 {config.liquid_temperature_end:.6g} C，"
             f"饱和温度为 {k_to_c(saturation_temperature_k):.6g} C。"
         )

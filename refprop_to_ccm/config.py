@@ -35,6 +35,9 @@ class ToolConfig:
     vapor_specific_heat_source: str
     starccm_exe: Path | None
     output_directory: Path
+    gas_table_mode: str = "temperature"
+    quality_points: int | None = None
+    viscosity_model: str = "cicchitti"
 
     @property
     def saturation_pressure_pa(self) -> float:
@@ -89,6 +92,9 @@ class ToolConfig:
             "vapor_phase_name": self.vapor_phase_name,
             "vapor_specific_heat_source": self.vapor_specific_heat_source,
             "liquid_property_mode": self.liquid_property_mode,
+            "gas_table_mode": self.gas_table_mode,
+            "gas_quality_points": str(self.quality_points) if self.quality_points is not None else "auto",
+            "gas_viscosity_model": self.viscosity_model,
             "starccm_exe": str(self.starccm_exe) if self.starccm_exe else None,
         }
 
@@ -111,23 +117,30 @@ def load_config(path: Path) -> ToolConfig:
     if sat_type not in {"pressure", "temperature"}:
         raise ValueError("saturation.type must be pressure or temperature.")
 
-    temp_start = float(gas_table["temperature_start"])
-    temp_end = float(gas_table["temperature_end"])
-    temp_step = float(gas_table.get("temperature_step", 1.0))
+    gas_table_mode = str(gas_table.get("mode") or "temperature").strip().lower()
+    if gas_table_mode not in {"temperature", "equivalent_quality"}:
+        raise ValueError("gas_table.mode must be temperature or equivalent_quality.")
+    temp_start = _required_float_if(gas_table, "temperature_start", gas_table_mode == "temperature", 0.0, "gas_table")
+    temp_end = _required_float_if(gas_table, "temperature_end", gas_table_mode == "temperature", 0.0, "gas_table")
+    temp_step = float(gas_table.get("temperature_step", 0.1))
     if temp_step <= 0:
         raise ValueError("gas_table.temperature_step must be positive.")
-    if temp_end < temp_start:
+    if gas_table_mode == "temperature" and temp_end < temp_start:
         raise ValueError("gas_table.temperature_end must be greater than or equal to start.")
     specific_heat_source = str(gas_table.get("specific_heat_source") or "cp_table").strip().lower()
     if specific_heat_source not in {"cp_table", "enthalpy_table"}:
         raise ValueError("gas_table.specific_heat_source must be cp_table or enthalpy_table.")
+    quality_points = _optional_quality_points(gas_table.get("quality_points"))
+    viscosity_model = str(gas_table.get("viscosity_model") or "cicchitti").strip().lower()
+    if viscosity_model not in {"mcadams", "cicchitti"}:
+        raise ValueError("gas_table.viscosity_model must be mcadams or cicchitti.")
 
     liquid_mode = str(liquid_table.get("mode") or "saturation").strip().lower()
     if liquid_mode not in {"saturation", "table"}:
         raise ValueError("liquid_table.mode must be saturation or table.")
-    liquid_temp_start = _required_float_if(liquid_table, "temperature_start", liquid_mode == "table", 0.0)
-    liquid_temp_end = _required_float_if(liquid_table, "temperature_end", liquid_mode == "table", 0.0)
-    liquid_temp_step = float(liquid_table.get("temperature_step", 1.0))
+    liquid_temp_start = _required_float_if(liquid_table, "temperature_start", liquid_mode == "table", 0.0, "liquid_table")
+    liquid_temp_end = _required_float_if(liquid_table, "temperature_end", liquid_mode == "table", 0.0, "liquid_table")
+    liquid_temp_step = float(liquid_table.get("temperature_step", 0.1))
     if liquid_temp_step <= 0:
         raise ValueError("liquid_table.temperature_step must be positive.")
     if liquid_mode == "table" and liquid_temp_end < liquid_temp_start:
@@ -164,6 +177,9 @@ def load_config(path: Path) -> ToolConfig:
         vapor_specific_heat_source=specific_heat_source,
         starccm_exe=Path(str(starccm["starccm_exe"])) if starccm.get("starccm_exe") else None,
         output_directory=Path(str(output.get("directory") or "out")),
+        gas_table_mode=gas_table_mode,
+        quality_points=quality_points,
+        viscosity_model=viscosity_model,
     )
 
 
@@ -180,10 +196,22 @@ def _optional_float(value: Any) -> float | None:
     return float(value)
 
 
-def _required_float_if(data: dict[str, Any], key: str, required: bool, default: float) -> float:
+def _optional_quality_points(value: Any) -> int | None:
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if text in {"", "auto", "自动"}:
+        return None
+    points = int(text)
+    if points < 2:
+        raise ValueError("gas_table.quality_points must be auto or an integer greater than or equal to 2.")
+    return points
+
+
+def _required_float_if(data: dict[str, Any], key: str, required: bool, default: float, section: str) -> float:
     value = data.get(key)
     if value is None or value == "":
         if required:
-            raise ValueError(f"liquid_table.{key} is required when liquid_table.mode is table.")
+            raise ValueError(f"{section}.{key} is required for the selected mode.")
         return default
     return float(value)

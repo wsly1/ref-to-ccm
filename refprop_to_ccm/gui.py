@@ -20,6 +20,7 @@ DEFAULT_STARCCM_EXE = (
     r"E:\Program Files\STAR-CCM_202602\starccm_2026\21.02.007-R8"
     r"\STAR-CCM+21.02.007-R8\star\lib\win64\clang20.1vc14.2-r8\lib\starccm+.exe"
 )
+SATURATION_TABLE_OFFSET_C = 0.001
 
 
 class RefpropToCcmApp(tk.Tk):
@@ -31,6 +32,8 @@ class RefpropToCcmApp(tk.Tk):
 
         self.saturation_type = tk.StringVar(value="pressure")
         self.use_saturation_pressure = tk.BooleanVar(value=True)
+        self.gas_table_mode = tk.StringVar(value="temperature")
+        self.gas_viscosity_model = tk.StringVar(value="cicchitti")
         self.vapor_specific_heat_source = tk.StringVar(value="cp_table")
         self.liquid_property_mode = tk.StringVar(value="saturation")
         self.run_star = tk.BooleanVar(value=False)
@@ -46,10 +49,11 @@ class RefpropToCcmApp(tk.Tk):
             "gas_pressure": tk.StringVar(value=""),
             "temp_start": tk.StringVar(value="30"),
             "temp_end": tk.StringVar(value="120"),
-            "temp_step": tk.StringVar(value="2"),
+            "temp_step": tk.StringVar(value="0.1"),
+            "gas_quality_points": tk.StringVar(value="自动"),
             "liquid_temp_start": tk.StringVar(value="0"),
             "liquid_temp_end": tk.StringVar(value="9"),
-            "liquid_temp_step": tk.StringVar(value="1"),
+            "liquid_temp_step": tk.StringVar(value="0.1"),
             "sim_file": tk.StringVar(value=""),
             "output_sim_file": tk.StringVar(value=""),
             "continuum_name": tk.StringVar(value="R454C"),
@@ -62,6 +66,7 @@ class RefpropToCcmApp(tk.Tk):
         self._build()
         self._sync_saturation_labels()
         self._sync_gas_pressure_state()
+        self._sync_gas_table_mode_state()
         self._sync_liquid_table_state()
         self._wire_validation()
 
@@ -99,7 +104,21 @@ class RefpropToCcmApp(tk.Tk):
         return frame
 
     def _build_refprop_page(self) -> ttk.Frame:
-        root = ttk.Frame(self.container)
+        outer = ttk.Frame(self.container)
+        outer.columnconfigure(0, weight=1)
+        outer.rowconfigure(0, weight=1)
+
+        canvas = tk.Canvas(outer, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+
+        root = ttk.Frame(canvas)
+        canvas_window = canvas.create_window((0, 0), window=root, anchor="nw")
+        root.bind("<Configure>", lambda event: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda event: canvas.itemconfigure(canvas_window, width=event.width))
+
         root.columnconfigure(0, weight=1)
         root.columnconfigure(1, weight=1)
         root.rowconfigure(5, weight=1)
@@ -135,29 +154,56 @@ class RefpropToCcmApp(tk.Tk):
             row=2, column=2, sticky="ew", padx=(8, 0), pady=6
         )
         self.saturation_result_var = tk.StringVar(value="尚未计算饱和温度")
-        ttk.Label(fluid_frame, textvariable=self.saturation_result_var, foreground="#1f5f8b").grid(
-            row=3, column=0, columnspan=3, sticky="w", pady=(2, 6)
+        saturation_result_entry = ttk.Entry(
+            fluid_frame,
+            textvariable=self.saturation_result_var,
+            state="readonly",
+        )
+        saturation_result_entry.grid(
+            row=3, column=0, columnspan=2, sticky="ew", pady=(2, 6)
+        )
+        ttk.Button(fluid_frame, text="复制结果", command=self._copy_saturation_result).grid(
+            row=3, column=2, sticky="ew", padx=(8, 0), pady=(2, 6)
         )
 
         gas_frame = self._section(root, "气态温度相关表", 2, 0)
-        self._entry(gas_frame, 0, "温度起点 C", "temp_start", "")
-        self._entry(gas_frame, 1, "温度终点 C", "temp_end", "")
-        self._entry(gas_frame, 2, "温度步长 C", "temp_step", "")
+        gas_mode_row = ttk.Frame(gas_frame)
+        gas_mode_row.grid(row=0, column=0, columnspan=3, sticky="ew", pady=6)
+        ttk.Label(gas_mode_row, text="气相表模式").pack(side="left", padx=(0, 12))
+        ttk.Radiobutton(
+            gas_mode_row,
+            text="按温度表",
+            value="temperature",
+            variable=self.gas_table_mode,
+            command=self._sync_gas_table_mode_state,
+        ).pack(side="left", padx=(0, 18))
+        ttk.Radiobutton(
+            gas_mode_row,
+            text="RefEquiv 等效干度表",
+            value="equivalent_quality",
+            variable=self.gas_table_mode,
+            command=self._sync_gas_table_mode_state,
+        ).pack(side="left")
+
+        self.gas_temperature_range_widgets: list[tk.Widget] = []
+        self.gas_temperature_range_widgets.extend(self._entry(gas_frame, 1, "温度起点 C", "temp_start", ""))
+        self.gas_temperature_range_widgets.extend(self._entry(gas_frame, 2, "温度终点 C", "temp_end", ""))
+        self._entry(gas_frame, 3, "温度步长 C", "temp_step", "")
         self.temp_warning_var = tk.StringVar(value="提示：温度起点必须大于饱和温度。")
         self.temp_warning_label = ttk.Label(gas_frame, textvariable=self.temp_warning_var, foreground="#9a5b00")
-        self.temp_warning_label.grid(row=3, column=0, columnspan=3, sticky="w", pady=(2, 6))
+        self.temp_warning_label.grid(row=4, column=0, columnspan=3, sticky="w", pady=(2, 6))
         ttk.Checkbutton(
             gas_frame,
             text="气态压力默认等于饱和压力",
             variable=self.use_saturation_pressure,
             command=self._sync_gas_pressure_state,
-        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=6)
+        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=6)
         self.gas_pressure_label = ttk.Label(gas_frame, text="气态压力 MPa")
-        self.gas_pressure_label.grid(row=5, column=0, sticky="w", pady=6)
+        self.gas_pressure_label.grid(row=6, column=0, sticky="w", pady=6)
         self.gas_pressure_entry = ttk.Entry(gas_frame, textvariable=self.vars["gas_pressure"])
-        self.gas_pressure_entry.grid(row=5, column=1, sticky="ew", pady=6)
+        self.gas_pressure_entry.grid(row=6, column=1, sticky="ew", pady=6)
         cp_source_row = ttk.Frame(gas_frame)
-        cp_source_row.grid(row=6, column=0, columnspan=3, sticky="ew", pady=6)
+        cp_source_row.grid(row=7, column=0, columnspan=3, sticky="ew", pady=6)
         ttk.Label(cp_source_row, text="气态比热来源").pack(side="left", padx=(0, 12))
         ttk.Radiobutton(
             cp_source_row,
@@ -172,8 +218,42 @@ class RefpropToCcmApp(tk.Tk):
             variable=self.vapor_specific_heat_source,
         ).pack(side="left")
 
+        self.gas_quality_widgets: list[tk.Widget] = []
+        self.gas_quality_widgets.extend(self._entry(gas_frame, 8, "干度点数", "gas_quality_points", "自动或整数"))
+        ttk.Label(
+            gas_frame,
+            text=(
+                "干度 Q 是质量含气率：Q=0 为饱和液，Q=1 为饱和气。"
+                "填“自动”时，程序按直接 REFPROP 失败的温度点数量决定；也可以手动填整数。"
+            ),
+            foreground="#666",
+            wraplength=420,
+        ).grid(row=9, column=0, columnspan=3, sticky="w", pady=(0, 6))
+        viscosity_row = ttk.Frame(gas_frame)
+        viscosity_row.grid(row=10, column=0, columnspan=3, sticky="ew", pady=6)
+        viscosity_label = ttk.Label(viscosity_row, text="等效粘度模型")
+        viscosity_label.pack(side="left", padx=(0, 12))
+        viscosity_combo = ttk.Combobox(
+            viscosity_row,
+            textvariable=self.gas_viscosity_model,
+            values=("cicchitti", "mcadams"),
+            state="readonly",
+            width=14,
+        )
+        viscosity_combo.pack(side="left")
+        self.gas_quality_widgets.extend([viscosity_label, viscosity_combo])
+        ttk.Label(
+            gas_frame,
+            text=(
+                "McAdams：调和平均，基于质量含气率 Q，适用于常规两相流压降计算。\n"
+                "Cicchitti：体积加权算术平均，基于气相体积分数，适用于高流速均匀流动（RefEquiv 推荐）。"
+            ),
+            foreground="#666",
+            wraplength=420,
+        ).grid(row=11, column=0, columnspan=3, sticky="w", pady=(0, 6))
+
         liquid_table_frame = ttk.LabelFrame(gas_frame, text="液态材料属性", padding=8)
-        liquid_table_frame.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+        liquid_table_frame.grid(row=12, column=0, columnspan=3, sticky="ew", pady=(8, 0))
         liquid_table_frame.columnconfigure(1, weight=1)
         liquid_mode_row = ttk.Frame(liquid_table_frame)
         liquid_mode_row.grid(row=0, column=0, columnspan=3, sticky="ew", pady=(0, 6))
@@ -236,7 +316,7 @@ class RefpropToCcmApp(tk.Tk):
         scrollbar = ttk.Scrollbar(log_frame, orient="vertical", command=self.log.yview)
         scrollbar.grid(row=0, column=1, sticky="ns")
         self.log.configure(yscrollcommand=scrollbar.set)
-        return root
+        return outer
 
     def _build_coolant_page(self) -> ttk.Frame:
         root = ttk.Frame(self.container)
@@ -317,11 +397,17 @@ class RefpropToCcmApp(tk.Tk):
         frame.columnconfigure(1, weight=1)
         return frame
 
-    def _entry(self, parent: ttk.Frame, row: int, label: str, key: str, hint: str) -> None:
-        ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", pady=6)
-        ttk.Entry(parent, textvariable=self.vars[key]).grid(row=row, column=1, sticky="ew", pady=6)
+    def _entry(self, parent: ttk.Frame, row: int, label: str, key: str, hint: str) -> list[tk.Widget]:
+        label_widget = ttk.Label(parent, text=label)
+        label_widget.grid(row=row, column=0, sticky="w", pady=6)
+        entry_widget = ttk.Entry(parent, textvariable=self.vars[key])
+        entry_widget.grid(row=row, column=1, sticky="ew", pady=6)
+        widgets: list[tk.Widget] = [label_widget, entry_widget]
         if hint:
-            ttk.Label(parent, text=hint, foreground="#666").grid(row=row, column=2, sticky="w", padx=(8, 0))
+            hint_widget = ttk.Label(parent, text=hint, foreground="#666")
+            hint_widget.grid(row=row, column=2, sticky="w", padx=(8, 0))
+            widgets.append(hint_widget)
+        return widgets
 
     def _file_entry(self, parent: ttk.Frame, row: int, label: str, key: str, filetypes: list[tuple[str, str]]) -> None:
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", pady=6)
@@ -347,8 +433,9 @@ class RefpropToCcmApp(tk.Tk):
             self.vars[key].set(directory)
 
     def _wire_validation(self) -> None:
-        for key in ("fluid_name", "saturation_value", "temp_start", "liquid_temp_start", "liquid_temp_end", "liquid_temp_step"):
+        for key in ("fluid_name", "saturation_value", "temp_start", "gas_quality_points", "liquid_temp_start", "liquid_temp_end", "liquid_temp_step"):
             self.vars[key].trace_add("write", lambda *_: self._update_temperature_warning())
+        self.gas_table_mode.trace_add("write", lambda *_: self._sync_gas_table_mode_state())
 
     def _on_saturation_type_changed(self) -> None:
         self._sync_saturation_labels()
@@ -365,10 +452,15 @@ class RefpropToCcmApp(tk.Tk):
         self.gas_pressure_entry.configure(state=state)
         self.gas_pressure_label.configure(foreground="#777" if state == "disabled" else "#000")
 
+    def _sync_gas_table_mode_state(self) -> None:
+        self._update_temperature_warning()
+
     def _sync_liquid_table_state(self) -> None:
         state = "normal" if self.liquid_property_mode.get() == "table" else "disabled"
         for widget in getattr(self, "liquid_table_widgets", []):
             widget.configure(state=state)
+        if self.liquid_property_mode.get() == "table" and self.last_saturation_temperature_c is not None:
+            self._suggest_liquid_temperature_end(self.last_saturation_temperature_c)
 
     def _calculate_saturation_temperature(self) -> None:
         try:
@@ -386,14 +478,29 @@ class RefpropToCcmApp(tk.Tk):
             f"饱和温度：{temp_c:.6g} C；饱和压力：{saturation.pressure_pa / 1.0e6:.6g} MPa"
         )
         self._suggest_gas_temperature_start(temp_c)
+        if self.liquid_property_mode.get() == "table":
+            self._suggest_liquid_temperature_end(temp_c)
         self._append_log(self.saturation_result_var.get())
         self._update_temperature_warning()
 
+    def _copy_saturation_result(self) -> None:
+        text = self.saturation_result_var.get()
+        if not text:
+            return
+        self.clipboard_clear()
+        self.clipboard_append(text)
+        self.status_var.set("饱和温度结果已复制")
+
     def _update_temperature_warning(self) -> None:
+        if self.gas_table_mode.get() == "equivalent_quality":
+            self.temp_warning_var.set("混合模式会先按温度范围直接取表；失败的温度点再用 RefEquiv 等效数据替代。")
+            self.temp_warning_label.configure(foreground="#1f5f8b")
+            return
+
         try:
             start_c = float(self.vars["temp_start"].get().strip())
         except ValueError:
-            self.temp_warning_var.set("提示：温度起点必须是数字，并且必须大于饱和温度。")
+            self.temp_warning_var.set("提示：温度起点必须是数字，并且不能小于饱和温度。")
             self.temp_warning_label.configure(foreground="#b00020")
             return
 
@@ -411,11 +518,11 @@ class RefpropToCcmApp(tk.Tk):
             self.temp_warning_label.configure(foreground="#9a5b00")
             return
 
-        if start_c <= sat_c:
-            self.temp_warning_var.set(f"错误：温度起点 {start_c:.6g} C 必须大于饱和温度 {sat_c:.6g} C。")
+        if start_c < sat_c:
+            self.temp_warning_var.set(f"错误：温度起点 {start_c:.6g} C 不能小于饱和温度 {sat_c:.6g} C。")
             self.temp_warning_label.configure(foreground="#b00020")
         else:
-            self.temp_warning_var.set(f"合格：温度起点 {start_c:.6g} C 大于饱和温度 {sat_c:.6g} C。")
+            self.temp_warning_var.set(f"合格：温度起点 {start_c:.6g} C 不小于饱和温度 {sat_c:.6g} C。")
             self.temp_warning_label.configure(foreground="#1f7a1f")
 
     def _start(self) -> None:
@@ -441,6 +548,10 @@ class RefpropToCcmApp(tk.Tk):
     def _finish_success(self, result) -> None:
         sat_c = result.summary["saturation"]["temperature_C"]
         self.last_saturation_temperature_c = sat_c
+        used_quality_points = result.summary.get("gas_equivalent_quality_points_used")
+        current_quality_points = self.vars["gas_quality_points"].get().strip().lower()
+        if used_quality_points is not None and current_quality_points in {"", "auto", "自动"}:
+            self.vars["gas_quality_points"].set(str(used_quality_points))
         self.saturation_result_var.set(
             f"饱和温度：{sat_c:.6g} C；饱和压力：{result.summary['saturation']['pressure_MPa']:.6g} MPa"
         )
@@ -468,13 +579,22 @@ class RefpropToCcmApp(tk.Tk):
 
         sat_type = self.saturation_type.get()
         saturation_value = _float_value(self.vars["saturation_value"].get(), "饱和压力或饱和温度")
+        gas_table_mode = self.gas_table_mode.get()
+        if gas_table_mode not in {"temperature", "equivalent_quality"}:
+            gas_table_mode = "temperature"
         temp_start = _float_value(self.vars["temp_start"].get(), "温度起点")
         temp_end = _float_value(self.vars["temp_end"].get(), "温度终点")
         temp_step = _float_value(self.vars["temp_step"].get(), "温度步长")
         if temp_step <= 0:
             raise ValueError("温度步长必须大于0。")
-        if temp_end < temp_start:
+        if gas_table_mode == "temperature" and temp_end < temp_start:
             raise ValueError("温度终点不能小于温度起点。")
+        gas_quality_points = _optional_int_value(self.vars["gas_quality_points"].get(), "干度点数")
+        if gas_quality_points is not None and gas_quality_points < 2:
+            raise ValueError("干度点数必须是“自动”或大于等于2的整数。")
+        gas_viscosity_model = self.gas_viscosity_model.get()
+        if gas_viscosity_model not in {"cicchitti", "mcadams"}:
+            gas_viscosity_model = "cicchitti"
         liquid_mode = self.liquid_property_mode.get()
         if liquid_mode not in {"saturation", "table"}:
             liquid_mode = "saturation"
@@ -489,7 +609,7 @@ class RefpropToCcmApp(tk.Tk):
         else:
             liquid_temp_start = 0.0
             liquid_temp_end = 0.0
-            liquid_temp_step = 1.0
+            liquid_temp_step = 0.1
 
         gas_pressure = None
         if not self.use_saturation_pressure.get():
@@ -527,6 +647,9 @@ class RefpropToCcmApp(tk.Tk):
             vapor_specific_heat_source=self.vapor_specific_heat_source.get(),
             starccm_exe=Path(starccm_exe_text) if starccm_exe_text else None,
             output_directory=Path(self.vars["output_dir"].get().strip() or "out"),
+            gas_table_mode=gas_table_mode,
+            quality_points=gas_quality_points,
+            viscosity_model=gas_viscosity_model,
         )
 
         if validate_range:
@@ -664,15 +787,28 @@ class RefpropToCcmApp(tk.Tk):
         os.startfile(directory)
 
     def _suggest_gas_temperature_start(self, saturation_temperature_c: float) -> None:
-        suggested = saturation_temperature_c + 1.0
+        suggested = saturation_temperature_c + SATURATION_TABLE_OFFSET_C
         try:
             current = float(self.vars["temp_start"].get().strip())
         except ValueError:
             self.vars["temp_start"].set(f"{suggested:.6g}")
             return
-        if current <= saturation_temperature_c:
+        default_start_values = {"", "30"}
+        if self.vars["temp_start"].get().strip() in default_start_values or current < saturation_temperature_c:
             self.vars["temp_start"].set(f"{suggested:.6g}")
-            self._append_log(f"温度起点已自动调整为 {suggested:.6g} C。")
+            self._append_log(f"温度起点已自动调整为饱和温度上方 {suggested:.6g} C。")
+
+    def _suggest_liquid_temperature_end(self, saturation_temperature_c: float) -> None:
+        suggested = saturation_temperature_c - SATURATION_TABLE_OFFSET_C
+        try:
+            current = float(self.vars["liquid_temp_end"].get().strip())
+        except ValueError:
+            self.vars["liquid_temp_end"].set(f"{suggested:.6g}")
+            return
+        default_end_values = {"", "9"}
+        if self.vars["liquid_temp_end"].get().strip() in default_end_values or current > saturation_temperature_c:
+            self.vars["liquid_temp_end"].set(f"{suggested:.6g}")
+            self._append_log(f"液态温度终点已自动调整为饱和温度下方 {suggested:.6g} C。")
 
     def _save_gui_config(self) -> None:
         filename = filedialog.asksaveasfilename(
@@ -705,6 +841,8 @@ class RefpropToCcmApp(tk.Tk):
             "fields": {key: value.get() for key, value in self.vars.items()},
             "saturation_type": self.saturation_type.get(),
             "use_saturation_pressure": self.use_saturation_pressure.get(),
+            "gas_table_mode": self.gas_table_mode.get(),
+            "gas_viscosity_model": self.gas_viscosity_model.get(),
             "vapor_specific_heat_source": self.vapor_specific_heat_source.get(),
             "liquid_property_mode": self.liquid_property_mode.get(),
             "run_star": self.run_star.get(),
@@ -720,6 +858,10 @@ class RefpropToCcmApp(tk.Tk):
             self.saturation_type.set(str(data["saturation_type"]))
         if data.get("vapor_specific_heat_source") in {"cp_table", "enthalpy_table"}:
             self.vapor_specific_heat_source.set(str(data["vapor_specific_heat_source"]))
+        if data.get("gas_table_mode") in {"temperature", "equivalent_quality"}:
+            self.gas_table_mode.set(str(data["gas_table_mode"]))
+        if data.get("gas_viscosity_model") in {"cicchitti", "mcadams"}:
+            self.gas_viscosity_model.set(str(data["gas_viscosity_model"]))
         if data.get("liquid_property_mode") in {"saturation", "table"}:
             self.liquid_property_mode.set(str(data["liquid_property_mode"]))
         if "use_saturation_pressure" in data:
@@ -730,6 +872,7 @@ class RefpropToCcmApp(tk.Tk):
         self.saturation_result_var.set("尚未计算饱和温度")
         self._sync_saturation_labels()
         self._sync_gas_pressure_state()
+        self._sync_gas_table_mode_state()
         self._sync_liquid_table_state()
         self._update_temperature_warning()
 
@@ -739,6 +882,22 @@ def _float_value(text: str, label: str) -> float:
         return float(text.strip())
     except ValueError as exc:
         raise ValueError(f"{label}必须是数字。") from exc
+
+
+def _int_value(text: str, label: str) -> int:
+    value = text.strip()
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise ValueError(f"{label}必须是整数。") from exc
+    return parsed
+
+
+def _optional_int_value(text: str, label: str) -> int | None:
+    value = text.strip().lower()
+    if value in {"", "auto", "自动"}:
+        return None
+    return _int_value(text, label)
 
 
 def main() -> int:
