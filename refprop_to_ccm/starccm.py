@@ -6,6 +6,8 @@ from pathlib import Path
 from .config import ToolConfig
 from .models import LiquidProperties
 
+STARCCM_RUN_TIMEOUT_SECONDS = 5 * 60
+
 
 def render_macro(
     config: ToolConfig,
@@ -307,13 +309,21 @@ class StarCcmRunner:
             handle.write("Command:\n")
             handle.write(" ".join(command))
             handle.write("\n\nOutput:\n")
-            completed = subprocess.run(
-                command,
-                stdout=handle,
-                stderr=subprocess.STDOUT,
-                text=True,
-                check=False,
-            )
+            try:
+                completed = subprocess.run(
+                    command,
+                    stdout=handle,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    check=False,
+                    timeout=STARCCM_RUN_TIMEOUT_SECONDS,
+                )
+            except subprocess.TimeoutExpired as exc:
+                handle.write(f"\nSTAR-CCM+ run timed out after {STARCCM_RUN_TIMEOUT_SECONDS} seconds.\n")
+                raise TimeoutError(
+                    f"STAR-CCM+ 运行超时（超过 {STARCCM_RUN_TIMEOUT_SECONDS} 秒）。"
+                    f"日志: {log_file.resolve()}"
+                ) from exc
         if completed.returncode != 0:
             raise RuntimeError(f"STAR-CCM+ run failed with exit code {completed.returncode}. Log: {log_file.resolve()}")
         return log_file.resolve()

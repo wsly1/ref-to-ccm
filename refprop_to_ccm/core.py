@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
 
 from .config import ToolConfig
 from .refprop_client import RefpropClient
+from .refprop_client import TEMPERATURE_EPSILON
 from .starccm import StarCcmRunner, render_macro
 from .tables import write_liquid_csv, write_liquid_json, write_summary_json, write_vapor_csv
 from .units import k_to_c
 
 SATURATION_TEMPERATURE_TOLERANCE_K = 1.0e-4
+MAX_TEMPERATURE_TABLE_ROWS = 100_000
 
 
 @dataclass(frozen=True)
@@ -28,6 +31,7 @@ class RunResult:
 
 
 def generate_outputs(config: ToolConfig, run_star: bool = False) -> RunResult:
+    validate_temperature_table_sizes(config)
     out_dir = config.output_directory
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -149,6 +153,41 @@ def validate_gas_temperature_range(config: ToolConfig, saturation_temperature_k:
             "气态温度范围的最小值不能小于饱和温度。"
             f"当前起点为 {config.gas_temperature_start:.6g} C，"
             f"饱和温度为 {k_to_c(saturation_temperature_k):.6g} C。"
+        )
+
+
+def validate_temperature_table_sizes(config: ToolConfig) -> None:
+    _validate_temperature_table_size(
+        "气态温度表",
+        config.gas_temperature_start_k,
+        config.gas_temperature_end_k,
+        config.gas_temperature_step_k,
+    )
+    if config.liquid_property_mode == "table":
+        _validate_temperature_table_size(
+            "液态温度表",
+            config.liquid_temperature_start_k,
+            config.liquid_temperature_end_k,
+            config.liquid_temperature_step_k,
+        )
+
+
+def _validate_temperature_table_size(label: str, start_k: float, end_k: float, step_k: float) -> None:
+    if not all(math.isfinite(value) for value in (start_k, end_k, step_k)):
+        raise ValueError(f"{label}的温度范围和步长必须为有限数值。")
+    if step_k <= 0.0:
+        raise ValueError(f"{label}的温度步长必须大于 0。")
+    if end_k < start_k:
+        raise ValueError(f"{label}的终点温度不能小于起点温度。")
+
+    row_count = math.floor((end_k + TEMPERATURE_EPSILON - start_k) / step_k) + 1
+    last_temperature_k = start_k + (row_count - 1) * step_k
+    if last_temperature_k < end_k - TEMPERATURE_EPSILON:
+        row_count += 1
+    if row_count > MAX_TEMPERATURE_TABLE_ROWS:
+        raise ValueError(
+            f"{label}预计生成 {row_count:,} 行，超过行数上限 {MAX_TEMPERATURE_TABLE_ROWS:,}。"
+            "请增大温度步长或缩小温度范围。"
         )
 
 
