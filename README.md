@@ -38,7 +38,7 @@ C:\Program Files (x86)\REFPROP
 已打包的 GUI 程序位于：
 
 ```powershell
-.\dist\refprop-to-ccm.exe
+.\release\refprop-to-ccm.exe
 ```
 
 打开可视化界面：
@@ -59,7 +59,7 @@ python -m refprop_to_ccm --gui
 python -m PyInstaller --noconfirm --clean --windowed --onefile --name refprop-to-ccm gui_launcher.py
 ```
 
-打包结果输出到 `dist\refprop-to-ccm.exe`。`build\` 和 `dist\` 是生成目录，不纳入 git。
+发布用 EXE 保存为 `release\refprop-to-ccm.exe`。本地临时构建目录 `build\`、`dist\` 和 `temp\` 不纳入 git。
 
 界面中可以先输入制冷剂名称和饱和压力，然后点击“计算饱和温度”。计算完成后，气相温度起点会默认填为饱和温度上方 `0.001 C`，避开气液边界点；用户仍可手动修改。气相表默认使用“按温度表”模式，此时温度起点不能小于饱和温度；底层生成流程也会再次校验。
 
