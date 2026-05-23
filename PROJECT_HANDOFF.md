@@ -37,6 +37,21 @@
      - `volume-flow`：已知入口温度、出口温度、换热量，反算体积流量。
    - 输出 Excel 文件格式参考 `E:\download\0518板换\codex参考.xlsx` 的防冻液区域，当前覆盖 `Sheet1!A14:F18`。
 
+3. 填入 STAR-CCM+ 数据
+   - GUI 主页单独入口。
+   - 只负责材料物性参数写入，不显示入口条件输入。
+   - `REFPROP 输出表`模式：读取 `liquid_properties.json`、`vapor_properties.csv` 和可选 `liquid_properties.csv`，生成或运行现有气液两相 STAR 写入宏。
+   - `防冻液 Excel`模式：读取防冻液工作簿 `Sheet1!A16:E16`，把温度、密度、比热、导热率、动力粘度写入已有液体材料常数。
+   - 代码入口：`refprop_to_ccm\star_apply.py`。
+
+4. 填入 STAR-CCM+ 入口条件
+   - GUI 主页单独入口。
+   - 只负责入口边界条件写入，不显示 REFPROP 输出表、液相常数、气相 CSV、目标连续体或相名等物性参数输入。
+   - 防冻液侧读取防冻液工作簿 `Sheet1!F17` 单片质量流量和 `Sheet1!B18` 入口温度。
+   - 制冷剂侧直接输入 STAR-CCM+ 入口边界需要的最终值：单层质量流量、入口温度和气体体积分数。
+   - STAR 定位使用用户输入的区域名和边界名。
+   - 页面有两个独立生成按钮：防冻液入口宏输出 `apply_coolant_inlet_to_star.java`，制冷剂入口宏输出 `apply_refrigerant_inlet_to_star.java`。
+
 ## 3. 主要入口
 
 启动 GUI：
@@ -56,6 +71,8 @@ GUI 启动后先进入“功能选择”主页，包含：
 ```text
 REFPROP 到 STAR-CCM+
 防冻液物性计算
+填入 STAR-CCM+ 数据
+填入 STAR-CCM+ 入口条件
 ```
 
 REFPROP 命令行：
@@ -96,6 +113,7 @@ refprop_to_ccm\gui.py
 refprop_to_ccm\models.py
 refprop_to_ccm\refprop_client.py
 refprop_to_ccm\starccm.py
+refprop_to_ccm\star_apply.py
 refprop_to_ccm\tables.py
 refprop_to_ccm\units.py
 ```
@@ -134,7 +152,8 @@ numpy>=2.0.0
 
 - STAR-CCM+ 宏只写入已有连续体、已有相和已有材料属性。
 - 宏不新建连续体、不选择模型、不新建相、不重命名相。
-- 防冻液功能当前只生成参数表，不直接写入 STAR-CCM+。
+- 防冻液物性计算页只生成参数表；防冻液写入 STAR-CCM+ 材料常数在“填入 STAR-CCM+ 数据”页完成。
+- 入口条件写入和物性参数写入是两个主页入口，不应在同一页面混放。
 - 防冻液计算不硬编码参考表样例数值，按 EGASP 数据实时计算。
 - 参考表样例中的部分数值可能不等于默认体积浓度 50% 的计算结果。
 
