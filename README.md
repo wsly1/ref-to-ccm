@@ -4,7 +4,7 @@
 
 ## 当前版本做什么
 
-1. 从界面或配置文件读取制冷剂、饱和压力或饱和温度、气相表模式、液态属性输入方式、STAR-CCM+ 项目信息。
+1. 从界面或配置文件读取制冷剂、饱和压力或饱和温度、气相表模式和液态属性输入方式，生成 REFPROP 物性表。
 2. 调用 REFPROP 计算：
    - 饱和温度和饱和压力
    - 液态饱和物性：比热、标准状态温度、导热率、动力粘度、密度、分子量、标准状态焓、生成热候选值
@@ -16,8 +16,10 @@
    - `vapor_properties.csv`
    - `apply_refprop_to_star.java`
    - `summary.json`
-4. 可选调用 STAR-CCM+，打开原始 `.sim` 并执行宏，默认另存为新 `.sim`。
-5. STAR-CCM+ 宏不新建连续体、不选择模型；它会查找指定连续体、gas 相和 liquid 相，并把 REFPROP 结果写入已有材料属性。
+4. 主页的“填入 STAR-CCM+ 数据”功能只负责物性参数写入：读取 REFPROP 输出表或防冻液 Excel，生成 STAR-CCM+ 材料物性写入宏，也可选择直接运行 STAR-CCM+。
+5. 制冷剂物性计算页会同步计算制冷剂入口条件，支持三种模式：输入换热量算总/单层质量流量；输入总质量流量算换热量；输入换热量和总质量流量并选择出口焓升高/降低来反算出口温度。制冷剂入口可以是液体、气体或气液混合状态。
+6. 主页的“填入 STAR-CCM+ 入口条件”功能只负责入口边界条件写入：读取防冻液 Excel 中已算好的单层流量和入口温度；制冷剂可手动填写最终入口值，也可从同一 Excel 的 `A25:F32` 制冷剂区读取。
+7. STAR-CCM+ 宏不新建连续体、不选择模型；材料物性宏会查找指定连续体、已有相或已有材料并写入材料属性，入口条件宏会查找指定区域和边界并写入边界条件。
 
 ## 安装依赖
 
@@ -33,6 +35,12 @@ C:\Program Files (x86)\REFPROP
 
 ## 使用
 
+已打包的 GUI 程序位于：
+
+```powershell
+.\dist\refprop-to-ccm.exe
+```
+
 打开可视化界面：
 
 ```powershell
@@ -44,6 +52,14 @@ C:\Program Files (x86)\REFPROP
 ```powershell
 python -m refprop_to_ccm --gui
 ```
+
+重新打包 exe：
+
+```powershell
+python -m PyInstaller --noconfirm --clean --windowed --onefile --name refprop-to-ccm gui_launcher.py
+```
+
+打包结果输出到 `dist\refprop-to-ccm.exe`。`build\` 和 `dist\` 是生成目录，不纳入 git。
 
 界面中可以先输入制冷剂名称和饱和压力，然后点击“计算饱和温度”。计算完成后，气相温度起点会默认填为饱和温度上方 `0.001 C`，避开气液边界点；用户仍可手动修改。气相表默认使用“按温度表”模式，此时温度起点不能小于饱和温度；底层生成流程也会再次校验。
 
@@ -66,13 +82,26 @@ python -m refprop_to_ccm --gui
 Copy-Item .\examples\config.r454c.yaml .\config.yaml
 ```
 
-只生成物性文件和 STAR-CCM+ 宏：
+只生成物性文件：
 
 ```powershell
 python -m refprop_to_ccm --config .\config.yaml --no-run-star
 ```
 
-生成后直接调用 STAR-CCM+：
+在 GUI 主页进入“填入 STAR-CCM+ 数据”，选择 `REFPROP 输出表`，填入：
+
+- `liquid_properties.json`
+- `vapor_properties.csv`
+- 可选 `liquid_properties.csv`
+- 原始 `.sim`、另存 `.sim`、连续体名、相名和 STAR-CCM+ 程序路径
+
+即可根据已有输出表生成或运行 STAR 写入宏。
+
+防冻液 Excel 也可在“填入 STAR-CCM+ 数据”中选择 `防冻液 Excel`，宏会读取 `A16:E16` 的温度、密度、比热、导热率和动力粘度，并写入已有液体材料常数。
+
+在 GUI 主页进入“填入 STAR-CCM+ 入口条件”时，页面只显示入口条件相关输入。防冻液侧从防冻液 Excel 读取 `F17` 单片质量流量和 `B18` 入口温度；制冷剂侧直接输入 STAR-CCM+ 入口边界需要的最终值：区域名、边界名、单层质量流量、入口温度和气体体积分数。页面提供两个独立按钮：防冻液入口宏输出为 `apply_coolant_inlet_to_star.java`，制冷剂入口宏输出为 `apply_refrigerant_inlet_to_star.java`。
+
+命令行生成后直接调用 STAR-CCM+ 的旧路径仍可用：
 
 ```powershell
 python -m refprop_to_ccm --config .\config.yaml

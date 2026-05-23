@@ -7,6 +7,7 @@ from pathlib import Path
 from xml.sax.saxutils import escape
 from zipfile import ZIP_DEFLATED, ZipFile
 
+from .inlet_conditions import RefrigerantInletCondition
 from .models import CoolantCalculation, CoolantRow, LiquidProperties, LiquidRow, VaporRow
 
 
@@ -35,6 +36,15 @@ COOLANT_COLUMN_WIDTHS = (
     (5, 5, 18.0),
     (6, 6, 18.0),
 )
+REFRIGERANT_TABLE_TITLE = "制冷剂物性参数"
+REFRIGERANT_PROPERTY_HEADERS = (
+    "相态",
+    "密度(kg/m3)",
+    "比热(J/kg.K)",
+    "导热系数(W/m.K)",
+    "动力粘度(Pa.s)",
+    "焓值(J/kg)",
+)
 
 
 def write_liquid_json(path: Path, liquid: LiquidProperties) -> None:
@@ -57,6 +67,9 @@ def write_coolant_xlsx(
     path: Path,
     row: CoolantRow,
     calculation: CoolantCalculation | None = None,
+    refrigerant: RefrigerantInletCondition | None = None,
+    saturated_liquid_row: LiquidRow | None = None,
+    saturated_vapor_row: VaporRow | None = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with ZipFile(path, "w", compression=ZIP_DEFLATED) as workbook:
@@ -67,7 +80,16 @@ def write_coolant_xlsx(
         workbook.writestr("xl/workbook.xml", _workbook_xml())
         workbook.writestr("xl/_rels/workbook.xml.rels", _workbook_rels_xml())
         workbook.writestr("xl/styles.xml", _styles_xml())
-        workbook.writestr("xl/worksheets/sheet1.xml", _coolant_sheet_xml(row, calculation))
+        workbook.writestr(
+            "xl/worksheets/sheet1.xml",
+            _coolant_sheet_xml(
+                row,
+                calculation,
+                refrigerant=refrigerant,
+                saturated_liquid_row=saturated_liquid_row,
+                saturated_vapor_row=saturated_vapor_row,
+            ),
+        )
 
 
 def _write_property_csv(path: Path, rows: list[VaporRow] | list[LiquidRow]) -> None:
@@ -87,7 +109,14 @@ def _write_property_csv(path: Path, rows: list[VaporRow] | list[LiquidRow]) -> N
             )
 
 
-def _coolant_sheet_xml(row: CoolantRow, calculation: CoolantCalculation | None) -> str:
+def _coolant_sheet_xml(
+    row: CoolantRow,
+    calculation: CoolantCalculation | None,
+    *,
+    refrigerant: RefrigerantInletCondition | None,
+    saturated_liquid_row: LiquidRow | None,
+    saturated_vapor_row: VaporRow | None,
+) -> str:
     calculated = calculation or CoolantCalculation(
         row=row,
         solve_mode="heat",
@@ -144,6 +173,18 @@ def _coolant_sheet_xml(row: CoolantRow, calculation: CoolantCalculation | None) 
         17: flow_cells,
         18: thermal_cells,
     }
+    merge_refs = ["A14:F14"]
+    dimension_ref = "A14:F18"
+
+    if (
+        refrigerant is not None
+        and saturated_liquid_row is not None
+        and saturated_vapor_row is not None
+    ):
+        rows.update(_refrigerant_rows(refrigerant, saturated_liquid_row, saturated_vapor_row))
+        merge_refs.append("A25:F25")
+        dimension_ref = "A14:F32"
+
     sheet_rows = "".join(
         f'<row r="{index}">{"".join(cells)}</row>' for index, cells in rows.items()
     )
@@ -151,10 +192,11 @@ def _coolant_sheet_xml(row: CoolantRow, calculation: CoolantCalculation | None) 
         f'<col min="{min_col}" max="{max_col}" width="{width}" customWidth="1"/>'
         for min_col, max_col, width in COOLANT_COLUMN_WIDTHS
     )
+    merge_cells_xml = "".join(f'<mergeCell ref="{merge_ref}"/>' for merge_ref in merge_refs)
     return (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
         '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
-        '<dimension ref="A14:F18"/>'
+        f'<dimension ref="{dimension_ref}"/>'
         '<sheetViews><sheetView workbookViewId="0"/></sheetViews>'
         '<sheetFormatPr defaultColWidth="9" defaultRowHeight="13.5"/>'
         '<cols>'
@@ -163,9 +205,90 @@ def _coolant_sheet_xml(row: CoolantRow, calculation: CoolantCalculation | None) 
         '<sheetData>'
         f"{sheet_rows}"
         "</sheetData>"
-        '<mergeCells count="1"><mergeCell ref="A14:F14"/></mergeCells>'
+        f'<mergeCells count="{len(merge_refs)}">{merge_cells_xml}</mergeCells>'
         "</worksheet>"
     )
+
+
+def _refrigerant_rows(
+    refrigerant: RefrigerantInletCondition,
+    saturated_liquid_row: LiquidRow,
+    saturated_vapor_row: VaporRow,
+) -> dict[int, list[str]]:
+    mass_flow_kg_h = refrigerant.total_mass_flow_kg_s * 3600.0
+    return {
+        25: [
+            _inline_str_cell("A25", REFRIGERANT_TABLE_TITLE, style=1),
+            _blank_cell("B25", style=1),
+            _blank_cell("C25", style=1),
+            _blank_cell("D25", style=1),
+            _blank_cell("E25", style=1),
+            _blank_cell("F25", style=1),
+        ],
+        26: [
+            _inline_str_cell("A26", REFRIGERANT_PROPERTY_HEADERS[0], style=2),
+            _inline_str_cell("B26", REFRIGERANT_PROPERTY_HEADERS[1], style=2),
+            _inline_str_cell("C26", REFRIGERANT_PROPERTY_HEADERS[2], style=2),
+            _inline_str_cell("D26", REFRIGERANT_PROPERTY_HEADERS[3], style=2),
+            _inline_str_cell("E26", REFRIGERANT_PROPERTY_HEADERS[4], style=2),
+            _inline_str_cell("F26", REFRIGERANT_PROPERTY_HEADERS[5], style=2),
+        ],
+        27: _refrigerant_property_row("27", "饱和液相", saturated_liquid_row),
+        28: _refrigerant_property_row("28", "饱和气相", saturated_vapor_row),
+        29: [
+            _inline_str_cell("A29", "入口温度(C)", style=2),
+            _number_cell("B29", refrigerant.inlet_temperature_c, style=2),
+            _inline_str_cell("C29", "出口温度(C)", style=2),
+            _number_cell("D29", refrigerant.outlet_temperature_c, style=2),
+            _inline_str_cell("E29", "换热量(W)", style=2),
+            _number_cell("F29", refrigerant.heat_transfer_w, style=2),
+        ],
+        30: [
+            _inline_str_cell("A30", "入口焓(J/kg)", style=2),
+            _number_cell("B30", _optional_number(refrigerant.inlet_enthalpy_j_per_kg), style=2),
+            _inline_str_cell("C30", "出口焓(J/kg)", style=2),
+            _number_cell("D30", _optional_number(refrigerant.outlet_enthalpy_j_per_kg), style=2),
+            _inline_str_cell("E30", "求解模式", style=2),
+            _inline_str_cell("F30", refrigerant.solve_mode, style=2),
+        ],
+        31: [
+            _inline_str_cell("A31", "干度", style=2),
+            _number_cell("B31", refrigerant.quality, style=2),
+            _inline_str_cell("C31", "气相体积分数", style=2),
+            _number_cell("D31", refrigerant.vapor_volume_fraction, style=2),
+            _inline_str_cell("E31", "StarCCM+", style=2),
+            _inline_str_cell("F31", refrigerant.starccm_volume_fraction, style=2),
+        ],
+        32: [
+            _inline_str_cell("A32", "质量流量(kg/h)", style=2),
+            _number_cell("B32", mass_flow_kg_h, style=2),
+            _inline_str_cell("C32", "质量流量(kg/s)", style=2),
+            _number_cell("D32", refrigerant.total_mass_flow_kg_s, style=2),
+            _inline_str_cell("E32", "单层质量流量(kg/s)", style=2),
+            _number_cell("F32", refrigerant.single_layer_mass_flow_kg_s, style=2),
+        ],
+    }
+
+
+def _refrigerant_property_row(
+    row_number: str,
+    phase_label: str,
+    row: LiquidRow | VaporRow,
+) -> list[str]:
+    return [
+        _inline_str_cell(f"A{row_number}", phase_label, style=2),
+        _number_cell(f"B{row_number}", row.density_kg_per_m3, style=2),
+        _number_cell(f"C{row_number}", row.equivalent_specific_heat_j_per_kg_k, style=2),
+        _number_cell(f"D{row_number}", row.equivalent_thermal_conductivity_w_per_m_k, style=2),
+        _number_cell(f"E{row_number}", row.equivalent_dynamic_viscosity_pa_s, style=2),
+        _number_cell(f"F{row_number}", row.enthalpy_j_per_kg, style=2),
+    ]
+
+
+def _optional_number(value: float | None) -> float:
+    if value is None:
+        return 0.0
+    return value
 
 
 def _content_types_xml() -> str:

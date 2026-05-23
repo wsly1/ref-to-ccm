@@ -36,6 +36,10 @@ class LiquidProperties:
     heat_of_formation_input_j_per_kg: float
     vapor_heat_of_formation_input_j_per_kg: float
     density_temperature_derivative_kg_per_m3_k: float
+    saturated_vapor_density_kg_per_m3: float = 0.0
+    saturated_vapor_specific_heat_j_per_kg_k: float = 0.0
+    saturated_vapor_thermal_conductivity_w_per_m_k: float = 0.0
+    saturated_vapor_dynamic_viscosity_pa_s: float = 0.0
 
     def to_json(self) -> dict[str, float]:
         data = asdict(self)

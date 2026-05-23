@@ -91,12 +91,35 @@ class RefpropClient:
             molecular_weight_kg_per_kmol=props["molecular_weight"],
             saturated_liquid_enthalpy_j_per_kg=props["enthalpy"],
             saturated_vapor_enthalpy_j_per_kg=vapor_props["enthalpy"],
+            saturated_vapor_density_kg_per_m3=vapor_props["density"],
+            saturated_vapor_specific_heat_j_per_kg_k=vapor_props["cp"],
+            saturated_vapor_thermal_conductivity_w_per_m_k=vapor_props["thermal_conductivity"],
+            saturated_vapor_dynamic_viscosity_pa_s=vapor_props["dynamic_viscosity"],
             liquid_standard_state_enthalpy_j_per_kg=props["enthalpy"],
             vapor_standard_state_enthalpy_j_per_kg=vapor_props["enthalpy"],
             heat_of_formation_input_j_per_kg=props["enthalpy"],
             vapor_heat_of_formation_input_j_per_kg=vapor_props["enthalpy"],
             density_temperature_derivative_kg_per_m3_k=0.0,
         )
+
+    def enthalpy_tp(self, fluid_name: str, pressure_pa: float, temperature_k: float) -> float:
+        pressure_kpa = pressure_pa / 1000.0
+        flash = self.rp.TPFLSHdll(temperature_k, pressure_kpa, self.z)
+        self._check(flash.ierr, flash.herr, f"calculating enthalpy for {fluid_name} at T={temperature_k} K, P={pressure_pa} Pa")
+        props = self._properties_td(temperature_k, flash.D, self.z)
+        return props["enthalpy"]
+
+    def temperature_ph(self, fluid_name: str, pressure_pa: float, enthalpy_j_per_kg: float) -> float:
+        pressure_kpa = pressure_pa / 1000.0
+        molecular_weight = self.rp.WMOLdll(self.z)
+        enthalpy_j_per_mol = enthalpy_j_per_kg * molecular_weight / 1000.0
+        flash = self.rp.PHFLSHdll(pressure_kpa, enthalpy_j_per_mol, self.z)
+        self._check(
+            flash.ierr,
+            flash.herr,
+            f"calculating temperature for {fluid_name} at P={pressure_pa} Pa, H={enthalpy_j_per_kg} J/kg",
+        )
+        return flash.T
 
     def vapor_table(
         self,

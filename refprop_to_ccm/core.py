@@ -2,15 +2,18 @@ from __future__ import annotations
 
 import json
 import math
+from dataclasses import asdict
 from dataclasses import dataclass
 from pathlib import Path
 
 from .config import ToolConfig
+from .inlet_conditions import calculate_refrigerant_inlet
+from .models import LiquidProperties
 from .refprop_client import RefpropClient
 from .refprop_client import TEMPERATURE_EPSILON
 from .starccm import StarCcmRunner, render_macro
 from .tables import write_liquid_csv, write_liquid_json, write_summary_json, write_vapor_csv
-from .units import k_to_c
+from .units import k_to_c, temperature_to_k
 
 SATURATION_TEMPERATURE_TOLERANCE_K = 1.0e-4
 MAX_TEMPERATURE_TABLE_ROWS = 100_000
@@ -102,6 +105,15 @@ def generate_outputs(config: ToolConfig, run_star: bool = False) -> RunResult:
         "vapor_properties": str(vapor_csv.resolve()),
         "starccm": config.starccm_summary(),
     }
+    refrigerant_inlet_summary = build_refrigerant_inlet_condition_summary(
+        config=config,
+        refprop=refprop,
+        liquid=liquid,
+        saturation_pressure_pa=saturation.pressure_pa,
+        saturation_temperature_k=saturation.temperature_k,
+    )
+    if refrigerant_inlet_summary is not None:
+        summary["refrigerant_inlet_condition"] = refrigerant_inlet_summary
     write_summary_json(summary_json, summary)
 
     macro_text = render_macro(
@@ -143,6 +155,76 @@ def resolve_saturation(refprop: RefpropClient, config: ToolConfig):
     if config.saturation_type == "temperature":
         return refprop.saturation_from_temperature(config.fluid_name, config.saturation_temperature_k)
     raise ValueError(f"Unsupported saturation type: {config.saturation_type}")
+
+
+def build_refrigerant_inlet_condition_summary(
+    config: ToolConfig,
+    refprop,
+    liquid: LiquidProperties,
+    saturation_pressure_pa: float,
+    saturation_temperature_k: float,
+) -> dict[str, float | str] | None:
+    solve_mode = config.refrigerant_inlet_solve_mode or "heat_transfer"
+    if config.refrigerant_layer_count is None or config.refrigerant_inlet_temperature_c is None:
+        return None
+    if solve_mode == "heat_transfer" and config.refrigerant_heat_transfer_w is None:
+        return None
+    if solve_mode == "mass_flow" and config.refrigerant_total_mass_flow_kg_s is None:
+        return None
+    if solve_mode in {"heat_transfer", "mass_flow"} and config.refrigerant_outlet_temperature_c is None:
+        return None
+    if solve_mode == "outlet_temperature" and (
+        config.refrigerant_heat_transfer_w is None
+        or config.refrigerant_total_mass_flow_kg_s is None
+        or config.refrigerant_outlet_enthalpy_direction is None
+    ):
+        return None
+    if solve_mode not in {"heat_transfer", "mass_flow", "outlet_temperature"}:
+        raise ValueError("refrigerant_inlet_solve_mode must be heat_transfer, mass_flow, or outlet_temperature.")
+
+    inlet_temperature_k = temperature_to_k(config.refrigerant_inlet_temperature_c, "C")
+    inlet_enthalpy_j_per_kg = refprop.enthalpy_tp(config.fluid_name, saturation_pressure_pa, inlet_temperature_k)
+    outlet_enthalpy_direction = ""
+    if solve_mode == "outlet_temperature":
+        outlet_enthalpy_direction = str(config.refrigerant_outlet_enthalpy_direction).strip().lower()
+        if outlet_enthalpy_direction not in {"increase", "decrease"}:
+            raise ValueError("refrigerant_outlet_enthalpy_direction must be increase or decrease.")
+        if config.refrigerant_total_mass_flow_kg_s <= 0.0:
+            raise ValueError("refrigerant_total_mass_flow_kg_s must be greater than 0.")
+        enthalpy_delta = config.refrigerant_heat_transfer_w / config.refrigerant_total_mass_flow_kg_s
+        if outlet_enthalpy_direction == "increase":
+            outlet_enthalpy_j_per_kg = inlet_enthalpy_j_per_kg + enthalpy_delta
+        else:
+            outlet_enthalpy_j_per_kg = inlet_enthalpy_j_per_kg - enthalpy_delta
+        outlet_temperature_k = refprop.temperature_ph(
+            config.fluid_name,
+            saturation_pressure_pa,
+            outlet_enthalpy_j_per_kg,
+        )
+        outlet_temperature_c = k_to_c(outlet_temperature_k)
+    else:
+        outlet_temperature_c = config.refrigerant_outlet_temperature_c
+        outlet_temperature_k = temperature_to_k(outlet_temperature_c, "C")
+        outlet_enthalpy_j_per_kg = refprop.enthalpy_tp(config.fluid_name, saturation_pressure_pa, outlet_temperature_k)
+
+    refrigerant_inlet = calculate_refrigerant_inlet(
+        solve_mode=solve_mode,
+        heat_transfer_w=config.refrigerant_heat_transfer_w,
+        total_mass_flow_kg_s=config.refrigerant_total_mass_flow_kg_s,
+        layer_count=config.refrigerant_layer_count,
+        inlet_temperature_c=config.refrigerant_inlet_temperature_c,
+        outlet_temperature_c=outlet_temperature_c,
+        inlet_enthalpy_j_per_kg=inlet_enthalpy_j_per_kg,
+        outlet_enthalpy_j_per_kg=outlet_enthalpy_j_per_kg,
+        saturated_liquid_enthalpy_j_per_kg=liquid.saturated_liquid_enthalpy_j_per_kg,
+        saturated_vapor_enthalpy_j_per_kg=liquid.saturated_vapor_enthalpy_j_per_kg,
+        saturated_liquid_density_kg_per_m3=liquid.density_kg_per_m3,
+        saturated_vapor_density_kg_per_m3=liquid.saturated_vapor_density_kg_per_m3,
+    )
+    payload = asdict(refrigerant_inlet)
+    if outlet_enthalpy_direction:
+        payload["outlet_enthalpy_direction"] = outlet_enthalpy_direction
+    return payload
 
 
 def validate_gas_temperature_range(config: ToolConfig, saturation_temperature_k: float) -> None:

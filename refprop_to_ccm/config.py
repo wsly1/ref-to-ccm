@@ -38,6 +38,14 @@ class ToolConfig:
     gas_table_mode: str = "temperature"
     quality_points: int | None = None
     viscosity_model: str = "cicchitti"
+    refrigerant_inlet_solve_mode: str | None = None
+    refrigerant_heat_transfer_w: float | None = None
+    refrigerant_total_mass_flow_kg_s: float | None = None
+    refrigerant_layer_count: int | None = None
+    refrigerant_inlet_temperature_c: float | None = None
+    refrigerant_outlet_temperature_c: float | None = None
+    refrigerant_outlet_enthalpy_direction: str | None = None
+    refrigerant_outlet_subcooling_c: float | None = None
 
     @property
     def saturation_pressure_pa(self) -> float:
@@ -110,6 +118,9 @@ def load_config(path: Path) -> ToolConfig:
     liquid_table = data.get("liquid_table") or {}
     if not isinstance(liquid_table, dict):
         raise ValueError("Config section 'liquid_table' must be a mapping when provided.")
+    refrigerant_inlet = data.get("refrigerant_inlet_condition") or {}
+    if not isinstance(refrigerant_inlet, dict):
+        raise ValueError("Config section 'refrigerant_inlet_condition' must be a mapping when provided.")
     starccm = _mapping(data, "starccm")
     output = data.get("output") or {}
 
@@ -152,6 +163,19 @@ def load_config(path: Path) -> ToolConfig:
     if not continuum_name:
         raise ValueError("starccm.continuum_name is required because the macro writes to an existing continuum.")
 
+    refrigerant_solve_mode = refrigerant_inlet.get("solve_mode")
+    if refrigerant_solve_mode is not None:
+        refrigerant_solve_mode = str(refrigerant_solve_mode).strip().lower()
+        if refrigerant_solve_mode not in {"heat_transfer", "mass_flow", "outlet_temperature"}:
+            raise ValueError(
+                "refrigerant_inlet_condition.solve_mode must be heat_transfer, mass_flow, or outlet_temperature."
+            )
+    refrigerant_outlet_direction = refrigerant_inlet.get("outlet_enthalpy_direction")
+    if refrigerant_outlet_direction is not None:
+        refrigerant_outlet_direction = str(refrigerant_outlet_direction).strip().lower()
+        if refrigerant_outlet_direction not in {"increase", "decrease"}:
+            raise ValueError("refrigerant_inlet_condition.outlet_enthalpy_direction must be increase or decrease.")
+
     return ToolConfig(
         fluid_name=str(fluid["name"]).strip(),
         fluid_components=fluid.get("components"),
@@ -180,6 +204,14 @@ def load_config(path: Path) -> ToolConfig:
         gas_table_mode=gas_table_mode,
         quality_points=quality_points,
         viscosity_model=viscosity_model,
+        refrigerant_inlet_solve_mode=refrigerant_solve_mode,
+        refrigerant_heat_transfer_w=_optional_float(refrigerant_inlet.get("heat_transfer_w")),
+        refrigerant_total_mass_flow_kg_s=_optional_float(refrigerant_inlet.get("total_mass_flow_kg_s")),
+        refrigerant_layer_count=_optional_int(refrigerant_inlet.get("layer_count")),
+        refrigerant_inlet_temperature_c=_optional_float(refrigerant_inlet.get("inlet_temperature_c")),
+        refrigerant_outlet_temperature_c=_optional_float(refrigerant_inlet.get("outlet_temperature_c")),
+        refrigerant_outlet_enthalpy_direction=refrigerant_outlet_direction,
+        refrigerant_outlet_subcooling_c=_optional_float(refrigerant_inlet.get("outlet_subcooling_c")),
     )
 
 
@@ -206,6 +238,12 @@ def _optional_quality_points(value: Any) -> int | None:
     if points < 2:
         raise ValueError("gas_table.quality_points must be auto or an integer greater than or equal to 2.")
     return points
+
+
+def _optional_int(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    return int(value)
 
 
 def _required_float_if(data: dict[str, Any], key: str, required: bool, default: float, section: str) -> float:
