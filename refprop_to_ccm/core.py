@@ -57,6 +57,8 @@ def generate_outputs(config: ToolConfig, run_star: bool = False) -> RunResult:
             temperature_start_k=config.gas_temperature_start_k,
             temperature_end_k=config.gas_temperature_end_k,
             temperature_step_k=config.gas_temperature_step_k,
+            quality_points=config.quality_points,
+            viscosity_model=config.viscosity_model,
         )
     elif config.gas_table_mode == "equivalent_quality":
         vapor_rows = refprop.equivalent_vapor_table(

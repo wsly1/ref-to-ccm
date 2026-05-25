@@ -13,7 +13,7 @@ from .models import CoolantCalculation, CoolantRow, LiquidProperties, LiquidRow,
 
 PROPERTY_HEADERS = [
     "Temperature (C)",
-    "Density (kg/m3)",
+    "Density (kg/m^3)",
     "Equivalent Specific Heat (J/kg-K)",
     "Equivalent Thermal Conductivity (W/m-K)",
     "Equivalent Dynamic Viscosity (Pa-s)",

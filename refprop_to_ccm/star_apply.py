@@ -11,6 +11,7 @@ from .inlet_conditions import (
     CoolantInletCondition,
     RefrigerantInletCondition,
     calculate_refrigerant_inlet,
+    describe_starccm_volume_fractions,
     load_coolant_calculation_from_xlsx,
     load_refrigerant_inlet_from_xlsx,
 )
@@ -62,7 +63,7 @@ def apply_star_from_outputs(config: StarApplyConfig, run_star: bool = False) -> 
     source_type = config.source_type.strip().lower()
     if source_type == "refprop":
         macro_text = _render_refprop_macro(config)
-        macro_file = config.output_directory / "apply_refprop_tables_to_star.java"
+        macro_file = config.output_directory / "apply_refprop_to_star.java"
     elif source_type == "coolant":
         macro_text = _render_coolant_macro(config)
         macro_file = config.output_directory / "apply_coolant_to_star.java"
@@ -345,11 +346,17 @@ def render_inlet_conditions_macro(
 package macro;
 
 import star.common.*;
+import star.flow.*;
+import star.material.*;
+import star.base.neo.DoubleVector;
 
 public class apply_inlet_conditions_to_star extends StarMacro {{
   private Simulation sim;
 
   private static final String OUTPUT_SIM = "{_java(str(config.output_sim_file))}";
+  private static final String CONTINUUM_NAME = "{_java(config.continuum_name)}";
+  private static final String LIQUID_PHASE_NAME = "{_java(config.liquid_phase_name)}";
+  private static final String VAPOR_PHASE_NAME = "{_java(config.vapor_phase_name)}";
 
   private static final class CoolantTarget {{
     private static final String REGION_NAME = "{_java(config.coolant_region_name)}";
@@ -363,12 +370,13 @@ public class apply_inlet_conditions_to_star extends StarMacro {{
     private static final String BOUNDARY_NAME = "{_java(config.refrigerant_boundary_name)}";
     private static final double SINGLE_LAYER_MASS_FLOW_KG_S = {refrigerant.single_layer_mass_flow_kg_s:.12g};
     private static final double INLET_TEMPERATURE_C = {refrigerant.inlet_temperature_c:.12g};
-    private static final String VOLUME_FRACTION = "{_java(refrigerant.starccm_volume_fraction)}";
+    private static final double LIQUID_VOLUME_FRACTION = {refrigerant.liquid_volume_fraction:.12g};
     private static final double VAPOR_VOLUME_FRACTION = {refrigerant.vapor_volume_fraction:.12g};
   }}
 
   public void execute() {{
     sim = getActiveSimulation();
+    Units celsiusUnit = (Units) sim.getUnitsManager().getObject("C");
     Boundary coolantBoundary = getBoundary("coolant", CoolantTarget.REGION_NAME, CoolantTarget.BOUNDARY_NAME);
     sim.println("[refprop-to-ccm] Coolant single-plate mass flow kg/s = " + CoolantTarget.SINGLE_PLATE_MASS_FLOW_KG_S);
     sim.println("[refprop-to-ccm] Coolant inlet temperature C = " + CoolantTarget.INLET_TEMPERATURE_C);
@@ -376,89 +384,42 @@ public class apply_inlet_conditions_to_star extends StarMacro {{
       coolantBoundary,
       new String[] {{"star.flow.MassFlowRateProfile", "star.flow.MassFluxProfile"}},
       CoolantTarget.SINGLE_PLATE_MASS_FLOW_KG_S,
+      null,
       "coolant mass flow"
     );
     setBoundaryScalarAny(
       coolantBoundary,
       new String[] {{"star.energy.StaticTemperatureProfile", "star.energy.TotalTemperatureProfile", "star.energy.TemperatureProfile"}},
-      celsiusToKelvin(CoolantTarget.INLET_TEMPERATURE_C),
+      CoolantTarget.INLET_TEMPERATURE_C,
+      celsiusUnit,
       "coolant inlet temperature"
     );
 
     Boundary refrigerantBoundary = getBoundary("refrigerant", RefrigerantTarget.REGION_NAME, RefrigerantTarget.BOUNDARY_NAME);
     sim.println("[refprop-to-ccm] Refrigerant single-layer mass flow kg/s = " + RefrigerantTarget.SINGLE_LAYER_MASS_FLOW_KG_S);
     sim.println("[refprop-to-ccm] Refrigerant inlet temperature C = " + RefrigerantTarget.INLET_TEMPERATURE_C);
-    sim.println("[refprop-to-ccm] Refrigerant volume fraction = " + RefrigerantTarget.VOLUME_FRACTION);
+    sim.println("[refprop-to-ccm] Refrigerant phase fractions: " + LIQUID_PHASE_NAME + "=" + RefrigerantTarget.LIQUID_VOLUME_FRACTION + ", " + VAPOR_PHASE_NAME + "=" + RefrigerantTarget.VAPOR_VOLUME_FRACTION);
     setBoundaryScalarAny(
       refrigerantBoundary,
       new String[] {{"star.flow.MassFlowRateProfile", "star.flow.MassFluxProfile"}},
       RefrigerantTarget.SINGLE_LAYER_MASS_FLOW_KG_S,
+      null,
       "refrigerant mass flow"
     );
     setBoundaryScalarAny(
       refrigerantBoundary,
       new String[] {{"star.energy.StaticTemperatureProfile", "star.energy.TotalTemperatureProfile", "star.energy.TemperatureProfile"}},
-      celsiusToKelvin(RefrigerantTarget.INLET_TEMPERATURE_C),
+      RefrigerantTarget.INLET_TEMPERATURE_C,
+      celsiusUnit,
       "refrigerant inlet temperature"
     );
-    setBoundaryScalarAny(
-      refrigerantBoundary,
-      new String[] {{"star.multiphase.VolumeFractionProfile", "star.eulerianmultiphasemodel.VolumeFractionProfile", "star.common.VolumeFractionProfile"}},
-      RefrigerantTarget.VAPOR_VOLUME_FRACTION,
-      "refrigerant vapor volume fraction"
-    );
+    setVolumeFraction(refrigerantBoundary, CONTINUUM_NAME, LIQUID_PHASE_NAME, VAPOR_PHASE_NAME, RefrigerantTarget.LIQUID_VOLUME_FRACTION, RefrigerantTarget.VAPOR_VOLUME_FRACTION);
 
     sim.println("[refprop-to-ccm] Saving simulation as: " + OUTPUT_SIM);
     sim.saveState(OUTPUT_SIM);
   }}
 
-  private Boundary getBoundary(String label, String regionName, String boundaryName) {{
-    Region region = sim.getRegionManager().getRegion(regionName);
-    if (region == null) {{
-      throw new RuntimeException("Region not found for " + label + ": " + regionName);
-    }}
-    Boundary boundary = region.getBoundaryManager().getBoundary(boundaryName);
-    if (boundary == null) {{
-      throw new RuntimeException("Boundary not found for " + label + ": " + regionName + "/" + boundaryName);
-    }}
-    sim.println("[refprop-to-ccm] Target " + label + " boundary = " + regionName + "/" + boundaryName);
-    return boundary;
-  }}
-
-  private boolean setBoundaryScalarAny(Boundary boundary, String[] profileClassNames, double value, String label) {{
-    for (String profileClassName : profileClassNames) {{
-      if (setBoundaryScalar(boundary, profileClassName, value, label)) {{
-        return true;
-      }}
-    }}
-    sim.println("[refprop-to-ccm] Could not set " + label + " on boundary " + boundary.getPresentationName());
-    return false;
-  }}
-
-  private boolean setBoundaryScalar(Boundary boundary, String profileClassName, double value, String label) {{
-    try {{
-      Class profileClass = Class.forName(profileClassName);
-      Object profile = boundary.getValues().get(profileClass);
-      if (profile == null) {{
-        return false;
-      }}
-      Class methodClass = Class.forName("star.common.ConstantScalarProfileMethod");
-      profile.getClass().getMethod("setMethod", Class.class).invoke(profile, methodClass);
-      Object method = profile.getClass().getMethod("getMethod", Class.class).invoke(profile, methodClass);
-      Object quantity = method.getClass().getMethod("getQuantity").invoke(method);
-      quantity.getClass().getMethod("setValue", double.class).invoke(quantity, value);
-      sim.println("[refprop-to-ccm] Set " + label + " via " + profileClassName + " = " + value);
-      return true;
-    }} catch (Throwable ex) {{
-      sim.println("[refprop-to-ccm] Boundary scalar write skipped for " + label + " via " + profileClassName + ": " + ex.getMessage());
-      return false;
-    }}
-  }}
-
-  private double celsiusToKelvin(double temperatureC) {{
-    return temperatureC + 273.15;
-  }}
-}}
+{_boundary_macro_helpers()}
 """
 
 
@@ -479,17 +440,17 @@ public class apply_coolant_inlet_to_star extends StarMacro {{
 
   public void execute() {{
     sim = getActiveSimulation();
+    Units celsiusUnit = (Units) sim.getUnitsManager().getObject("C");
     Boundary boundary = getBoundary("coolant", REGION_NAME, BOUNDARY_NAME);
     sim.println("[refprop-to-ccm] Coolant single-plate mass flow kg/s = " + MASS_FLOW_KG_S);
     sim.println("[refprop-to-ccm] Coolant inlet temperature C = " + INLET_TEMPERATURE_C);
-    setBoundaryScalarAny(boundary, new String[] {{"star.flow.MassFlowRateProfile", "star.flow.MassFluxProfile"}}, MASS_FLOW_KG_S, "coolant mass flow");
-    setBoundaryScalarAny(boundary, new String[] {{"star.energy.StaticTemperatureProfile", "star.energy.TotalTemperatureProfile", "star.energy.TemperatureProfile"}}, celsiusToKelvin(INLET_TEMPERATURE_C), "coolant inlet temperature");
+    setBoundaryScalarAny(boundary, new String[] {{"star.flow.MassFlowRateProfile", "star.flow.MassFluxProfile"}}, MASS_FLOW_KG_S, null, "coolant mass flow");
+    setBoundaryScalarAny(boundary, new String[] {{"star.energy.StaticTemperatureProfile", "star.energy.TotalTemperatureProfile", "star.energy.TemperatureProfile"}}, INLET_TEMPERATURE_C, celsiusUnit, "coolant inlet temperature");
     sim.println("[refprop-to-ccm] Saving simulation as: " + OUTPUT_SIM);
     sim.saveState(OUTPUT_SIM);
   }}
 
-{_boundary_macro_helpers()}
-}}
+{_boundary_macro_helpers(include_volume_fraction=False)}
 """
 
 
@@ -498,33 +459,39 @@ def render_refrigerant_inlet_condition_macro(config: StarApplyConfig, refrigeran
 package macro;
 
 import star.common.*;
+import star.flow.*;
+import star.material.*;
+import star.base.neo.DoubleVector;
 
 public class apply_refrigerant_inlet_to_star extends StarMacro {{
   private Simulation sim;
 
   private static final String OUTPUT_SIM = "{_java(str(config.output_sim_file))}";
+  private static final String CONTINUUM_NAME = "{_java(config.continuum_name)}";
+  private static final String LIQUID_PHASE_NAME = "{_java(config.liquid_phase_name)}";
+  private static final String VAPOR_PHASE_NAME = "{_java(config.vapor_phase_name)}";
   private static final String REGION_NAME = "{_java(config.refrigerant_region_name)}";
   private static final String BOUNDARY_NAME = "{_java(config.refrigerant_boundary_name)}";
   private static final double MASS_FLOW_KG_S = {refrigerant.single_layer_mass_flow_kg_s:.12g};
   private static final double INLET_TEMPERATURE_C = {refrigerant.inlet_temperature_c:.12g};
-  private static final String VOLUME_FRACTION = "{_java(refrigerant.starccm_volume_fraction)}";
+  private static final double LIQUID_VOLUME_FRACTION = {refrigerant.liquid_volume_fraction:.12g};
   private static final double VAPOR_VOLUME_FRACTION = {refrigerant.vapor_volume_fraction:.12g};
 
   public void execute() {{
     sim = getActiveSimulation();
+    Units celsiusUnit = (Units) sim.getUnitsManager().getObject("C");
     Boundary boundary = getBoundary("refrigerant", REGION_NAME, BOUNDARY_NAME);
     sim.println("[refprop-to-ccm] Refrigerant single-layer mass flow kg/s = " + MASS_FLOW_KG_S);
     sim.println("[refprop-to-ccm] Refrigerant inlet temperature C = " + INLET_TEMPERATURE_C);
-    sim.println("[refprop-to-ccm] Refrigerant volume fraction = " + VOLUME_FRACTION);
-    setBoundaryScalarAny(boundary, new String[] {{"star.flow.MassFlowRateProfile", "star.flow.MassFluxProfile"}}, MASS_FLOW_KG_S, "refrigerant mass flow");
-    setBoundaryScalarAny(boundary, new String[] {{"star.energy.StaticTemperatureProfile", "star.energy.TotalTemperatureProfile", "star.energy.TemperatureProfile"}}, celsiusToKelvin(INLET_TEMPERATURE_C), "refrigerant inlet temperature");
-    setBoundaryScalarAny(boundary, new String[] {{"star.multiphase.VolumeFractionProfile", "star.eulerianmultiphasemodel.VolumeFractionProfile", "star.common.VolumeFractionProfile"}}, VAPOR_VOLUME_FRACTION, "refrigerant vapor volume fraction");
+    sim.println("[refprop-to-ccm] Refrigerant phase fractions: " + LIQUID_PHASE_NAME + "=" + LIQUID_VOLUME_FRACTION + ", " + VAPOR_PHASE_NAME + "=" + VAPOR_VOLUME_FRACTION);
+    setBoundaryScalarAny(boundary, new String[] {{"star.flow.MassFlowRateProfile", "star.flow.MassFluxProfile"}}, MASS_FLOW_KG_S, null, "refrigerant mass flow");
+    setBoundaryScalarAny(boundary, new String[] {{"star.energy.StaticTemperatureProfile", "star.energy.TotalTemperatureProfile", "star.energy.TemperatureProfile"}}, INLET_TEMPERATURE_C, celsiusUnit, "refrigerant inlet temperature");
+    setVolumeFraction(boundary, CONTINUUM_NAME, LIQUID_PHASE_NAME, VAPOR_PHASE_NAME, LIQUID_VOLUME_FRACTION, VAPOR_VOLUME_FRACTION);
     sim.println("[refprop-to-ccm] Saving simulation as: " + OUTPUT_SIM);
     sim.saveState(OUTPUT_SIM);
   }}
 
 {_boundary_macro_helpers()}
-}}
 """
 
 
@@ -637,18 +604,66 @@ def _direct_refrigerant_inlet(config: StarApplyConfig) -> RefrigerantInletCondit
         quality=vapor_fraction,
         vapor_volume_fraction=vapor_fraction,
         liquid_volume_fraction=liquid_fraction,
-        starccm_volume_fraction=f"[{_format_starccm_fraction(vapor_fraction)},{_format_starccm_fraction(liquid_fraction)}]",
+        starccm_volume_fraction=describe_starccm_volume_fractions(vapor_fraction, liquid_fraction),
     )
 
 
-def _format_starccm_fraction(value: float) -> str:
-    rounded = round(value)
-    if abs(value - rounded) <= 1.0e-12:
-        return str(int(rounded))
-    return format(value, ".12g")
-
-
-def _boundary_macro_helpers() -> str:
+def _boundary_macro_helpers(*, include_volume_fraction: bool = True) -> str:
+    volume_fraction_helper = """
+  private void setVolumeFraction(
+      Boundary boundary,
+      String continuumName,
+      String liquidPhaseName,
+      String vaporPhaseName,
+      double liquidFraction,
+      double vaporFraction) {
+    try {
+      PhysicsContinuum continuum = (PhysicsContinuum) sim.getContinuumManager().getContinuum(continuumName);
+      if (continuum == null) {
+        throw new RuntimeException("Continuum not found: " + continuumName);
+      }
+      EulerianMultiPhaseModel multiphase = continuum.getModelManager().getModel(EulerianMultiPhaseModel.class);
+      if (multiphase == null) {
+        throw new RuntimeException("Continuum does not have EulerianMultiPhaseModel: " + continuumName);
+      }
+      if (multiphase.getPhaseManager().getObjects().size() != 2) {
+        throw new RuntimeException("Volume fraction writer requires exactly two configured phases.");
+      }
+      double[] orderedFractions = new double[2];
+      boolean liquidFound = false;
+      boolean vaporFound = false;
+      int index = 0;
+      for (Object object : multiphase.getPhaseManager().getObjects()) {
+        Phase phase = (Phase) object;
+        String phaseName = phase.getPresentationName();
+        if (phaseName.equals(liquidPhaseName)) {
+          orderedFractions[index] = liquidFraction;
+          liquidFound = true;
+        } else if (phaseName.equals(vaporPhaseName)) {
+          orderedFractions[index] = vaporFraction;
+          vaporFound = true;
+        } else {
+          throw new RuntimeException("Unexpected phase in continuum: " + phaseName);
+        }
+        index++;
+      }
+      if (!liquidFound || !vaporFound) {
+        throw new RuntimeException(
+          "Could not find configured phase names: liquid=" + liquidPhaseName + ", vapor=" + vaporPhaseName
+        );
+      }
+      VolumeFractionProfile profile = boundary.getValues().get(VolumeFractionProfile.class);
+      profile.getMethod(ConstantArrayProfileMethod.class).getQuantity().setArray(new DoubleVector(orderedFractions));
+      sim.println(
+        "[refprop-to-ccm] Set volume fractions in continuum order: " +
+        multiphase.getPhaseManager().getObjects().toString() + " = " + new DoubleVector(orderedFractions).toString()
+      );
+    } catch (Throwable ex) {
+      sim.println("[refprop-to-ccm] Volume fraction write skipped: " + ex.getMessage());
+      throw new RuntimeException("Stop saving because refrigerant volume fraction could not be set from continuum phases.", ex);
+    }
+  }
+""" if include_volume_fraction else ""
     return """  private Boundary getBoundary(String label, String regionName, String boundaryName) {
     Region region = sim.getRegionManager().getRegion(regionName);
     if (region == null) {
@@ -662,9 +677,9 @@ def _boundary_macro_helpers() -> str:
     return boundary;
   }
 
-  private boolean setBoundaryScalarAny(Boundary boundary, String[] profileClassNames, double value, String label) {
+  private boolean setBoundaryScalarAny(Boundary boundary, String[] profileClassNames, double value, Units units, String label) {
     for (String profileClassName : profileClassNames) {
-      if (setBoundaryScalar(boundary, profileClassName, value, label)) {
+      if (setBoundaryScalar(boundary, profileClassName, value, units, label)) {
         return true;
       }
     }
@@ -672,7 +687,7 @@ def _boundary_macro_helpers() -> str:
     return false;
   }
 
-  private boolean setBoundaryScalar(Boundary boundary, String profileClassName, double value, String label) {
+  private boolean setBoundaryScalar(Boundary boundary, String profileClassName, double value, Units units, String label) {
     try {
       Class profileClass = Class.forName(profileClassName);
       Object profile = boundary.getValues().get(profileClass);
@@ -683,8 +698,12 @@ def _boundary_macro_helpers() -> str:
       profile.getClass().getMethod("setMethod", Class.class).invoke(profile, methodClass);
       Object method = profile.getClass().getMethod("getMethod", Class.class).invoke(profile, methodClass);
       Object quantity = method.getClass().getMethod("getQuantity").invoke(method);
-      quantity.getClass().getMethod("setValue", double.class).invoke(quantity, value);
-      sim.println("[refprop-to-ccm] Set " + label + " via " + profileClassName + " = " + value);
+      if (units != null) {
+        quantity.getClass().getMethod("setValueAndUnits", double.class, Units.class).invoke(quantity, value, units);
+      } else {
+        quantity.getClass().getMethod("setValue", double.class).invoke(quantity, value);
+      }
+      sim.println("[refprop-to-ccm] Set " + label + " via " + profileClassName + " = " + value + (units != null ? (" " + units.toString()) : ""));
       return true;
     } catch (Throwable ex) {
       sim.println("[refprop-to-ccm] Boundary scalar write skipped for " + label + " via " + profileClassName + ": " + ex.getMessage());
@@ -692,9 +711,7 @@ def _boundary_macro_helpers() -> str:
     }
   }
 
-  private double celsiusToKelvin(double temperatureC) {
-    return temperatureC + 273.15;
-  }"""
+""" + volume_fraction_helper + "}"""
 
 
 def _required_config_float(value: float | None, name: str) -> float:

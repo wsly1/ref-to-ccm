@@ -128,7 +128,31 @@ class RefpropClient:
         temperature_start_k: float,
         temperature_end_k: float,
         temperature_step_k: float,
+        quality_points: int | None = None,
+        viscosity_model: str = "cicchitti",
     ) -> list[VaporRow]:
+        try:
+            bubble_temperature_k = self._refprop_pq(pressure_pa, 0.0, "T")
+            dew_temperature_k = self._refprop_pq(pressure_pa, 1.0, "T")
+        except RuntimeError:
+            bubble_temperature_k = None
+            dew_temperature_k = None
+        if (
+            bubble_temperature_k is not None
+            and dew_temperature_k is not None
+            and dew_temperature_k > bubble_temperature_k + TEMPERATURE_EPSILON
+            and temperature_start_k <= dew_temperature_k + TEMPERATURE_EPSILON
+            and temperature_end_k >= bubble_temperature_k - TEMPERATURE_EPSILON
+        ):
+            return self.equivalent_vapor_table(
+                fluid_name=fluid_name,
+                pressure_pa=pressure_pa,
+                temperature_start_k=temperature_start_k,
+                temperature_end_k=temperature_end_k,
+                temperature_step_k=temperature_step_k,
+                quality_points=quality_points,
+                viscosity_model=viscosity_model,
+            )
         rows: list[VaporRow] = []
         for temperature_k in _temperature_points(temperature_start_k, temperature_end_k, temperature_step_k):
             rows.append(self._vapor_row_tp(fluid_name, pressure_pa, temperature_k))

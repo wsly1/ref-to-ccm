@@ -63,7 +63,7 @@ python -m PyInstaller --noconfirm --clean --windowed --onefile --name refprop-to
 
 界面中可以先输入制冷剂名称和饱和压力，然后点击“计算饱和温度”。计算完成后，气相温度起点会默认填为饱和温度上方 `0.001 C`，避开气液边界点；用户仍可手动修改。气相表默认使用“按温度表”模式，此时温度起点不能小于饱和温度；底层生成流程也会再次校验。
 
-如果制冷剂是非共沸混合工质，并且直接按温度/压力从 REFPROP 取两相滑移区附近的比热、导热率或粘度会失败，可以把气相表模式切到 `equivalent_quality`。该模式会先按你输入的温度起点、终点和步长生成同一套温度点；落在泡点到露点滑移区、也就是容易出现 `#VALUE!` 的温度点，会参考 `RefEquiv` 的做法，用 `PQ` 干度路径生成等效比热容、等效导热率和等效动力粘度并替代该点。滑移区外仍使用直接 REFPROP 结果。
+如果制冷剂是非共沸混合工质，气相温度范围触及泡点到露点的两相滑移区时，即使选择“按温度表”模式，程序也会自动对滑移区内的整行物性使用 `RefEquiv` 方法：密度使用 `PQ` 真实混合密度、焓使用 `PQ` 混合焓、比热容使用焓差法、导热率使用 EMT、动力粘度使用所选 McAdams 或 Cicchitti 模型。滑移区外仍使用直接 REFPROP 结果。选择 `equivalent_quality` 可明确要求采用同一替代流程。
 
 液态材料属性有两种方式：
 
@@ -72,7 +72,7 @@ python -m PyInstaller --noconfirm --clean --windowed --onefile --name refprop-to
 
 注意：如果目标 STAR-CCM+ 液相当前使用“恒密度”模型，STAR 不接受密度温度表；宏会保留饱和状态常密度，并在日志中记录密度表未绑定。比热、导热率、动力粘度是否能绑定，取决于目标材料属性当前支持的表格方法。
 
-气态材料属性的比热来源可以选择 `Cp(T)` 表或焓表。气态和液态温度范围分别设置，互不共用。`equivalent_quality` 模式也使用气态温度起点、终点和步长，保证替代前后的温度步长一致。
+气态材料属性的比热来源可以选择 `Cp(T)` 表或焓表。气态和液态温度范围分别设置，互不共用。自动替代及 `equivalent_quality` 模式均使用气态温度起点、终点和步长，保证替代前后的温度步长一致。
 
 目标连续体名称必须填写为 `.sim` 中已经存在的连续体名称；宏不会自动创建或重命名连续体。
 
@@ -99,7 +99,7 @@ python -m refprop_to_ccm --config .\config.yaml --no-run-star
 
 防冻液 Excel 也可在“填入 STAR-CCM+ 数据”中选择 `防冻液 Excel`，宏会读取 `A16:E16` 的温度、密度、比热、导热率和动力粘度，并写入已有液体材料常数。
 
-在 GUI 主页进入“填入 STAR-CCM+ 入口条件”时，页面只显示入口条件相关输入。防冻液侧从防冻液 Excel 读取 `F17` 单片质量流量和 `B18` 入口温度；制冷剂侧直接输入 STAR-CCM+ 入口边界需要的最终值：区域名、边界名、单层质量流量、入口温度和气体体积分数。页面提供两个独立按钮：防冻液入口宏输出为 `apply_coolant_inlet_to_star.java`，制冷剂入口宏输出为 `apply_refrigerant_inlet_to_star.java`。
+在 GUI 主页进入“填入 STAR-CCM+ 入口条件”时，防冻液侧从防冻液 Excel 读取 `F17` 单片质量流量和 `B18` 入口温度；制冷剂侧直接输入 STAR-CCM+ 入口边界需要的最终值：区域名、边界名、单层质量流量、入口温度和气体体积分数。写入制冷剂入口时还必须填写目标连续体、液相名称和气相名称；宏会读取该连续体中的实际相顺序，将气体体积分数写到匹配气相名称的数组位置，将液体体积分数写到匹配液相名称的位置，不假定数组前后顺序。页面提供两个独立按钮：防冻液入口宏输出为 `apply_coolant_inlet_to_star.java`，制冷剂入口宏输出为 `apply_refrigerant_inlet_to_star.java`。
 
 命令行生成后直接调用 STAR-CCM+ 的旧路径仍可用：
 
@@ -111,8 +111,8 @@ python -m refprop_to_ccm --config .\config.yaml
 
 `gas_table.mode` 可选：
 
-- `temperature`：原有模式，固定压力下按温度范围调用 REFPROP。
-- `equivalent_quality`：混合替代模式，先按温度表直接取 REFPROP；失败温度点再用 RefEquiv 的 `PQ` 等效物性补齐。
+- `temperature`：固定压力下按温度范围调用 REFPROP；范围触及两相滑移区时，区内整行物性自动用 RefEquiv 的 `PQ` 等效路径替代。
+- `equivalent_quality`：明确使用混合替代流程；两相滑移区内的整行物性使用 RefEquiv 的 `PQ` 等效路径，区外仍使用直接 REFPROP。
 
 `gas_table.temperature_step` 在两个模式下都表示输出表格的温度步长。
 

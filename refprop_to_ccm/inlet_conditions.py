@@ -52,6 +52,14 @@ class RefrigerantInletCondition:
 RefrigerantInletCalculation = RefrigerantInletCondition
 
 
+def describe_starccm_volume_fractions(vapor_fraction: float, liquid_fraction: float) -> str:
+    return (
+        f"gas={_format_starccm_number(vapor_fraction)}, "
+        f"liquid={_format_starccm_number(liquid_fraction)}; "
+        "array order resolved from STAR continuum"
+    )
+
+
 def load_coolant_calculation_from_xlsx(path: str | Path) -> CoolantCalculationWorkbookValues:
     workbook_path = Path(path)
     if not workbook_path.exists():
@@ -113,9 +121,7 @@ def load_refrigerant_inlet_from_xlsx(path: str | Path) -> RefrigerantInletCondit
         quality=quality,
         vapor_volume_fraction=vapor_fraction,
         liquid_volume_fraction=liquid_fraction,
-        starccm_volume_fraction=(
-            f"[{_format_starccm_number(vapor_fraction)},{_format_starccm_number(liquid_fraction)}]"
-        ),
+        starccm_volume_fraction=describe_starccm_volume_fractions(vapor_fraction, liquid_fraction),
         heat_transfer_w=heat_transfer,
         outlet_temperature_c=outlet_temperature,
     )
@@ -205,8 +211,9 @@ def calculate_refrigerant_inlet(
         quality=quality,
         vapor_volume_fraction=vapor_volume_fraction,
         liquid_volume_fraction=liquid_volume_fraction,
-        starccm_volume_fraction=(
-            f"[{_format_starccm_number(vapor_volume_fraction)},{_format_starccm_number(liquid_volume_fraction)}]"
+        starccm_volume_fraction=describe_starccm_volume_fractions(
+            vapor_volume_fraction,
+            liquid_volume_fraction,
         ),
         solve_mode=normalized_solve_mode,
         heat_transfer_w=total_heat_transfer,

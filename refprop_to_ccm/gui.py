@@ -708,16 +708,19 @@ class RefpropToCcmApp(tk.Tk):
             "output_sim_file",
             [("STAR-CCM+ sim", "*.sim"), ("All files", "*.*")],
         ))
-        self._star_file_entry(star_frame, 3, "STAR-CCM+ 程序", "starccm_exe", [("Executable", "*.exe"), ("All files", "*.*")])
+        self._star_entry(star_frame, 3, "目标连续体名称", "continuum_name")
+        self._star_entry(star_frame, 4, "制冷剂液相名称", "liquid_phase_name")
+        self._star_entry(star_frame, 5, "制冷剂气相名称", "vapor_phase_name")
+        self._star_file_entry(star_frame, 6, "STAR-CCM+ 程序", "starccm_exe", [("Executable", "*.exe"), ("All files", "*.*")])
         ttk.Checkbutton(star_frame, text="生成后立即运行 STAR-CCM+", variable=self.star_apply_run).grid(
-            row=4, column=0, columnspan=3, sticky="w", pady=6
+            row=7, column=0, columnspan=3, sticky="w", pady=6
         )
         ttk.Label(
             star_frame,
-            text="勾选后会自动调用 STAR-CCM+ 执行宏并写入 sim；不勾选时只生成 Java 宏。",
+            text="制冷剂入口体积分数将按目标连续体中的相顺序写入；相名称必须与 sim 中一致。",
             foreground="#666",
             wraplength=420,
-        ).grid(row=5, column=0, columnspan=3, sticky="w", pady=(0, 6))
+        ).grid(row=8, column=0, columnspan=3, sticky="w", pady=(0, 6))
 
         out_frame = self._section(root, "输出", 2, 0)
         self._star_directory_entry(out_frame, 0, "宏输出目录", "output_dir")
@@ -1004,7 +1007,7 @@ class RefpropToCcmApp(tk.Tk):
 
     def _update_temperature_warning(self) -> None:
         if self.gas_table_mode.get() == "equivalent_quality":
-            self.temp_warning_var.set("混合模式会先按温度范围直接取表；失败的温度点再用 RefEquiv 等效数据替代。")
+            self.temp_warning_var.set("RefEquiv 模式会将泡点到露点滑移区内的整行物性替换为等效计算数据。")
             self.temp_warning_label.configure(foreground="#1f5f8b")
             return
 
@@ -1033,7 +1036,10 @@ class RefpropToCcmApp(tk.Tk):
             self.temp_warning_var.set(f"错误：温度起点 {start_c:.6g} C 不能小于饱和温度 {sat_c:.6g} C。")
             self.temp_warning_label.configure(foreground="#b00020")
         else:
-            self.temp_warning_var.set(f"合格：温度起点 {start_c:.6g} C 不小于饱和温度 {sat_c:.6g} C。")
+            self.temp_warning_var.set(
+                f"合格：温度起点 {start_c:.6g} C 不小于饱和温度 {sat_c:.6g} C；"
+                "若范围进入两相滑移区，将自动用 RefEquiv 替换区内整行物性。"
+            )
             self.temp_warning_label.configure(foreground="#1f7a1f")
 
     def _start(self) -> None:
@@ -1495,9 +1501,12 @@ class RefpropToCcmApp(tk.Tk):
                 or sim_file.with_name(sim_file.stem + "_star_apply.sim")
             )
         continuum_name = self.star_apply_vars["continuum_name"].get().strip()
+        refrigerant_inlet_source_types = {"inlet_conditions", "refrigerant_inlet_condition"}
         if source_type not in inlet_source_types and not continuum_name:
             raise ValueError("请输入目标连续体名称。")
-        if source_type in inlet_source_types and not continuum_name:
+        if source_type in refrigerant_inlet_source_types and not continuum_name:
+            raise ValueError("写入制冷剂入口气体体积分数时，请输入目标连续体名称。")
+        if source_type == "coolant_inlet_condition" and not continuum_name:
             continuum_name = "unused"
         starccm_exe_text = self.star_apply_vars["starccm_exe"].get().strip()
         liquid_csv_text = self.star_apply_vars["liquid_csv"].get().strip()
