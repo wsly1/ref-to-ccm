@@ -40,8 +40,10 @@ class LiquidProperties:
     saturated_vapor_specific_heat_j_per_kg_k: float = 0.0
     saturated_vapor_thermal_conductivity_w_per_m_k: float = 0.0
     saturated_vapor_dynamic_viscosity_pa_s: float = 0.0
+    liquid_standard_state_entropy_j_per_kg_k: float | None = None
+    vapor_standard_state_entropy_j_per_kg_k: float | None = None
 
-    def to_json(self) -> dict[str, float]:
+    def to_json(self) -> dict[str, float | None]:
         data = asdict(self)
         data["saturation_temperature_c"] = k_to_c(self.saturation_temperature_k)
         data["saturation_pressure_mpa"] = self.saturation_pressure_pa / 1.0e6

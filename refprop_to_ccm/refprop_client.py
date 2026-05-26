@@ -100,6 +100,8 @@ class RefpropClient:
             heat_of_formation_input_j_per_kg=props["enthalpy"],
             vapor_heat_of_formation_input_j_per_kg=vapor_props["enthalpy"],
             density_temperature_derivative_kg_per_m3_k=0.0,
+            liquid_standard_state_entropy_j_per_kg_k=props["entropy"],
+            vapor_standard_state_entropy_j_per_kg_k=vapor_props["entropy"],
         )
 
     def enthalpy_tp(self, fluid_name: str, pressure_pa: float, temperature_k: float) -> float:
@@ -347,6 +349,7 @@ class RefpropClient:
             "density": density_kg_m3,
             "cp": thermo.Cp * 1000.0 / molecular_weight,
             "enthalpy": thermo.h * 1000.0 / molecular_weight,
+            "entropy": thermo.s * 1000.0 / molecular_weight,
             "thermal_conductivity": transport.tcx,
             "dynamic_viscosity": transport.eta * 1.0e-6,
             "molecular_weight": molecular_weight,
