@@ -24,9 +24,9 @@ def render_macro(
     vapor_entropy_log = '    sim.println("  Vapor Standard State Entropy J/kg-K = not available in source JSON");'
     if liquid.vapor_standard_state_entropy_j_per_kg_k is not None:
         vapor_entropy_assignment = (
-            '    Units entropyUnit = (Units) sim.getUnitsManager().getObject("J/kg-K");\n'
-            '    setConstantWithUnits(material, "star.energy.StandardStateEntropyProperty", '
-            f'{liquid.vapor_standard_state_entropy_j_per_kg_k:.12g}, entropyUnit, "Vapor Standard State Entropy");\n'
+            '    setConstantWithUnitsOrDefault(material, "star.energy.StandardStateEntropyProperty", '
+            f'{liquid.vapor_standard_state_entropy_j_per_kg_k:.12g}, "J/kg-K", '
+            f'{liquid.vapor_standard_state_entropy_j_per_kg_k:.12g}, "Vapor Standard State Entropy");\n'
         )
         vapor_entropy_log = (
             '    sim.println("  Vapor Standard State Entropy J/kg-K = '
@@ -36,6 +36,7 @@ def render_macro(
 package macro;
 
 import java.io.File;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 
@@ -45,6 +46,8 @@ import star.material.*;
 
 public class apply_refprop_to_star extends StarMacro {{
   private Simulation sim;
+  private final List<String> successfulWrites = new ArrayList<String>();
+  private final List<String> failedWrites = new ArrayList<String>();
 
   private static final String CONTINUUM_NAME = "{_java(config.continuum_name)}";
   private static final String LIQUID_PHASE_NAME = "{_java(config.liquid_phase_name)}";
@@ -85,6 +88,7 @@ public class apply_refprop_to_star extends StarMacro {{
       setVaporProperties(vaporMaterial, vaporTable);
     }}
     writeLiquidValuesToLog();
+    writeApplySummary();
     sim.println("[refprop-to-ccm] Vapor table path: " + VAPOR_TABLE);
     sim.println("[refprop-to-ccm] Saving simulation as: " + OUTPUT_SIM);
     sim.saveState(OUTPUT_SIM);
@@ -189,27 +193,19 @@ public class apply_refprop_to_star extends StarMacro {{
 
   private void setLiquidProperties(Material material, Table table) {{
     sim.println("[refprop-to-ccm] Applying liquid saturated constants to " + material.getPresentationName());
-    Units celsiusUnit = (Units) sim.getUnitsManager().getObject("C");
-    Units specificHeatUnit = (Units) sim.getUnitsManager().getObject("J/kg-K");
-    Units conductivityUnit = (Units) sim.getUnitsManager().getObject("W/m-K");
-    Units viscosityUnit = (Units) sim.getUnitsManager().getObject("Pa-s");
-    Units densityUnit = (Units) sim.getUnitsManager().getObject("kg/m^3");
-    Units densityDerivativeUnit = (Units) sim.getUnitsManager().getObject("kg/m^3-K");
-    Units molecularWeightUnit = (Units) sim.getUnitsManager().getObject("kg/kmol");
-    Units enthalpyUnit = (Units) sim.getUnitsManager().getObject("J/kg");
-    setConstantWithUnits(material, "star.energy.SaturationTemperatureProperty", {saturation_temperature_c:.12g}, celsiusUnit, "Saturation Temperature");
-    setConstantWithUnits(material, "star.energy.SpecificHeatProperty", {liquid.specific_heat_j_per_kg_k:.12g}, specificHeatUnit, "Specific Heat");
-    setConstantWithUnits(material, "star.energy.StandardStateTemperatureProperty", {standard_state_temperature_c:.12g}, celsiusUnit, "Standard State Temperature");
-    setConstantWithUnits(material, "star.energy.ThermalConductivityProperty", {liquid.thermal_conductivity_w_per_m_k:.12g}, conductivityUnit, "Thermal Conductivity");
-    setConstantWithUnits(material, "star.flow.DynamicViscosityProperty", {liquid.dynamic_viscosity_pa_s:.12g}, viscosityUnit, "Dynamic Viscosity");
-    if (!setConstantWithUnits(material, "star.userdefinedeos.UserDefinedDensityProperty", {liquid.density_kg_per_m3:.12g}, densityUnit, "Liquid User-defined EOS Density")) {{
-      if (!setConstantWithUnits(material, "star.energy.PolynomialDensityProperty", {liquid.density_kg_per_m3:.12g}, densityUnit, "Polynomial Density")) {{
-        setConstantWithUnits(material, "star.flow.ConstantDensityProperty", {liquid.density_kg_per_m3:.12g}, densityUnit, "Constant Density");
+    setConstantWithUnitsOrDefault(material, "star.energy.SaturationTemperatureProperty", {saturation_temperature_c:.12g}, "C", {liquid.saturation_temperature_k:.12g}, "Saturation Temperature");
+    setConstantWithUnitsOrDefault(material, "star.energy.SpecificHeatProperty", {liquid.specific_heat_j_per_kg_k:.12g}, "J/kg-K", {liquid.specific_heat_j_per_kg_k:.12g}, "Specific Heat");
+    setConstantWithUnitsOrDefault(material, "star.energy.StandardStateTemperatureProperty", {standard_state_temperature_c:.12g}, "C", {liquid.standard_state_temperature_k:.12g}, "Standard State Temperature");
+    setConstantWithUnitsOrDefault(material, "star.energy.ThermalConductivityProperty", {liquid.thermal_conductivity_w_per_m_k:.12g}, "W/m-K", {liquid.thermal_conductivity_w_per_m_k:.12g}, "Thermal Conductivity");
+    setConstantWithUnitsOrDefault(material, "star.flow.DynamicViscosityProperty", {liquid.dynamic_viscosity_pa_s:.12g}, "Pa-s", {liquid.dynamic_viscosity_pa_s:.12g}, "Dynamic Viscosity");
+    if (!setConstantWithUnitsOrDefault(material, "star.userdefinedeos.UserDefinedDensityProperty", {liquid.density_kg_per_m3:.12g}, "kg/m^3", {liquid.density_kg_per_m3:.12g}, "Liquid User-defined EOS Density")) {{
+      if (!setConstantWithUnitsOrDefault(material, "star.energy.PolynomialDensityProperty", {liquid.density_kg_per_m3:.12g}, "kg/m^3", {liquid.density_kg_per_m3:.12g}, "Polynomial Density")) {{
+        setConstantWithUnitsOrDefault(material, "star.flow.ConstantDensityProperty", {liquid.density_kg_per_m3:.12g}, "kg/m^3", {liquid.density_kg_per_m3:.12g}, "Constant Density");
       }}
     }}
-    setConstantWithUnits(material, "star.userdefinedeos.UserDefinedDrhoDTProperty", {liquid.density_temperature_derivative_kg_per_m3_k:.12g}, densityDerivativeUnit, "Liquid Density Temperature Derivative");
-    setConstantWithUnits(material, "star.material.MolecularWeightProperty", {liquid.molecular_weight_kg_per_kmol:.12g}, molecularWeightUnit, "Molecular Weight");
-    setConstantWithUnits(material, "star.energy.HeatOfFormationProperty", {liquid.liquid_standard_state_enthalpy_j_per_kg:.12g}, enthalpyUnit, "Heat of Formation");
+    setConstantWithUnitsOrDefault(material, "star.userdefinedeos.UserDefinedDrhoDTProperty", {liquid.density_temperature_derivative_kg_per_m3_k:.12g}, "kg/m^3-K", {liquid.density_temperature_derivative_kg_per_m3_k:.12g}, "Liquid Density Temperature Derivative");
+    setConstantWithUnitsOrDefault(material, "star.material.MolecularWeightProperty", {liquid.molecular_weight_kg_per_kmol:.12g}, "kg/kmol", {liquid.molecular_weight_kg_per_kmol:.12g}, "Molecular Weight");
+    setConstantWithUnitsOrDefault(material, "star.energy.HeatOfFormationProperty", {liquid.liquid_standard_state_enthalpy_j_per_kg:.12g}, "J/kg", {liquid.liquid_standard_state_enthalpy_j_per_kg:.12g}, "Heat of Formation");
     if ("table".equals(LIQUID_PROPERTY_MODE) && table != null) {{
       sim.println("[refprop-to-ccm] Applying liquid temperature table to " + material.getPresentationName());
       setTemperatureTable(material, table, "star.energy.SpecificHeatProperty", "star.energy.SpecificHeatTemperatureTable", "Equivalent Specific Heat", "Equivalent Specific Heat", "Liquid Specific Heat");
@@ -226,16 +222,12 @@ public class apply_refprop_to_star extends StarMacro {{
 
   private void setVaporProperties(Material material, Table table) {{
     sim.println("[refprop-to-ccm] Applying vapor constants and temperature tables to " + material.getPresentationName());
-    Units celsiusUnit = (Units) sim.getUnitsManager().getObject("C");
-    Units densityDerivativeUnit = (Units) sim.getUnitsManager().getObject("kg/m^3-K");
-    Units molecularWeightUnit = (Units) sim.getUnitsManager().getObject("kg/kmol");
-    Units enthalpyUnit = (Units) sim.getUnitsManager().getObject("J/kg");
-    setConstantWithUnits(material, "star.energy.SaturationTemperatureProperty", {saturation_temperature_c:.12g}, celsiusUnit, "Saturation Temperature");
-    setConstantWithUnits(material, "star.energy.StandardStateTemperatureProperty", {standard_state_temperature_c:.12g}, celsiusUnit, "Standard State Temperature");
+    setConstantWithUnitsOrDefault(material, "star.energy.SaturationTemperatureProperty", {saturation_temperature_c:.12g}, "C", {liquid.saturation_temperature_k:.12g}, "Saturation Temperature");
+    setConstantWithUnitsOrDefault(material, "star.energy.StandardStateTemperatureProperty", {standard_state_temperature_c:.12g}, "C", {liquid.standard_state_temperature_k:.12g}, "Standard State Temperature");
 {vapor_entropy_assignment.rstrip()}
-    setConstantWithUnits(material, "star.material.MolecularWeightProperty", {liquid.molecular_weight_kg_per_kmol:.12g}, molecularWeightUnit, "Molecular Weight");
-    setConstantWithUnits(material, "star.userdefinedeos.UserDefinedDrhoDTProperty", {liquid.density_temperature_derivative_kg_per_m3_k:.12g}, densityDerivativeUnit, "Density Temperature Derivative");
-    setConstantWithUnits(material, "star.energy.HeatOfFormationProperty", {liquid.vapor_standard_state_enthalpy_j_per_kg:.12g}, enthalpyUnit, "Heat of Formation");
+    setConstantWithUnitsOrDefault(material, "star.material.MolecularWeightProperty", {liquid.molecular_weight_kg_per_kmol:.12g}, "kg/kmol", {liquid.molecular_weight_kg_per_kmol:.12g}, "Molecular Weight");
+    setConstantWithUnitsOrDefault(material, "star.userdefinedeos.UserDefinedDrhoDTProperty", {liquid.density_temperature_derivative_kg_per_m3_k:.12g}, "kg/m^3-K", {liquid.density_temperature_derivative_kg_per_m3_k:.12g}, "Density Temperature Derivative");
+    setConstantWithUnitsOrDefault(material, "star.energy.HeatOfFormationProperty", {liquid.vapor_standard_state_enthalpy_j_per_kg:.12g}, "J/kg", {liquid.vapor_standard_state_enthalpy_j_per_kg:.12g}, "Heat of Formation");
 
     if (!setTemperatureTable(material, table, "star.userdefinedeos.UserDefinedDensityProperty", "star.energy.TemperatureTableMethod", "Density", "Density", "User-defined EOS Density")) {{
       if (!setTemperatureTable(material, table, "star.energy.PolynomialDensityProperty", "star.energy.DensityTemperatureTableDT", "Density", "Density", "Density")) {{
@@ -258,18 +250,26 @@ public class apply_refprop_to_star extends StarMacro {{
     setTemperatureTable(material, table, "star.energy.SpecificHeatProperty", "star.userdefinedeos.UserDefinedSpecificHeatTemperatureTable", "Equivalent Specific Heat", "Equivalent Specific Heat", "User-defined EOS Specific Heat Cp(T)");
   }}
 
-  private boolean setConstantWithUnits(Material material, String propertyClassName, double value, Units units, String label) {{
+  private boolean setConstantWithUnitsOrDefault(Material material, String propertyClassName, double value, String unitName, double defaultUnitValue, String label) {{
     try {{
       Class propertyClass = Class.forName(propertyClassName);
       MaterialProperty property = (MaterialProperty) material.getMaterialProperties().getMaterialProperty(propertyClass);
-      property.setConstant(value);
+      property.setConstant(defaultUnitValue);
       MaterialPropertyMethod method = property.getMethod();
       Object quantity = method.getClass().getMethod("getQuantity").invoke(method);
-      quantity.getClass().getMethod("setValueAndUnits", double.class, Units.class).invoke(quantity, value, units);
-      sim.println("[refprop-to-ccm] Set " + label + " = " + value + " " + units.toString());
+      try {{
+        Units units = (Units) sim.getUnitsManager().getObject(unitName);
+        quantity.getClass().getMethod("setValueAndUnits", double.class, Units.class).invoke(quantity, value, units);
+        recordSuccess(label + " = " + value + " " + unitName + " (explicit unit)");
+        return true;
+      }} catch (Throwable unitEx) {{
+        sim.println("[refprop-to-ccm] Explicit unit write failed for " + label + " via " + propertyClassName + "; trying fallback default-unit numeric value = " + defaultUnitValue + ": " + unitEx.getMessage());
+      }}
+      quantity.getClass().getMethod("setValue", double.class).invoke(quantity, defaultUnitValue);
+      recordSuccess(label + " = " + defaultUnitValue + " (fallback default-unit numeric value; source " + value + " " + unitName + ")");
       return true;
     }} catch (Throwable ex) {{
-      sim.println("[refprop-to-ccm] Could not set " + label + " with units via " + propertyClassName + ": " + ex.getMessage());
+      recordFailure(label + " via " + propertyClassName + ": " + ex.getMessage());
       return false;
     }}
   }}
@@ -285,11 +285,31 @@ public class apply_refprop_to_star extends StarMacro {{
       interpolation.getClass().getMethod("setTable", Table.class).invoke(interpolation, table);
       setTableColumn(interpolation, "setT", "Temperature", "Temperature", "Temperature");
       setTableColumn(interpolation, "setData", dataColumn, fallbackDataColumn, label);
-      sim.println("[refprop-to-ccm] Bound " + label + " to table column: " + dataColumn + " / " + fallbackDataColumn);
+      recordSuccess("Bound " + label + " to table column: " + dataColumn + " / " + fallbackDataColumn);
       return true;
     }} catch (Throwable ex) {{
-      sim.println("[refprop-to-ccm] Could not bind " + label + " table via " + propertyClassName + " / " + methodClassName + ": " + ex.getMessage());
+      recordFailure("Could not bind " + label + " table via " + propertyClassName + " / " + methodClassName + ": " + ex.getMessage());
       return false;
+    }}
+  }}
+
+  private void recordSuccess(String detail) {{
+    successfulWrites.add(detail);
+    sim.println("[refprop-to-ccm] SUCCESS: " + detail);
+  }}
+
+  private void recordFailure(String detail) {{
+    failedWrites.add(detail);
+    sim.println("[refprop-to-ccm] FAILED: " + detail);
+  }}
+
+  private void writeApplySummary() {{
+    sim.println("[refprop-to-ccm] Apply summary: succeeded=" + successfulWrites.size() + ", failed=" + failedWrites.size());
+    for (String detail : successfulWrites) {{
+      sim.println("[refprop-to-ccm]   SUCCESS: " + detail);
+    }}
+    for (String detail : failedWrites) {{
+      sim.println("[refprop-to-ccm]   FAILED: " + detail);
     }}
   }}
 

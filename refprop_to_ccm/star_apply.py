@@ -236,6 +236,7 @@ def _render_coolant_macro(config: StarApplyConfig) -> str:
 package macro;
 
 import java.io.File;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 
@@ -245,6 +246,8 @@ import star.material.*;
 
 public class apply_coolant_to_star extends StarMacro {{
   private Simulation sim;
+  private final List<String> successfulWrites = new ArrayList<String>();
+  private final List<String> failedWrites = new ArrayList<String>();
 
   private static final String CONTINUUM_NAME = "{_java(config.continuum_name)}";
   private static final String LIQUID_PHASE_NAME = "{_java(config.liquid_phase_name)}";
@@ -255,17 +258,14 @@ public class apply_coolant_to_star extends StarMacro {{
     PhysicsContinuum continuum = getExistingContinuum();
     Material material = getLiquidMaterial(continuum);
     sim.println("[refprop-to-ccm] Applying coolant constants to " + material.getPresentationName());
-    Units specificHeatUnit = (Units) sim.getUnitsManager().getObject("J/kg-K");
-    Units conductivityUnit = (Units) sim.getUnitsManager().getObject("W/m-K");
-    Units viscosityUnit = (Units) sim.getUnitsManager().getObject("Pa-s");
-    Units densityUnit = (Units) sim.getUnitsManager().getObject("kg/m^3");
-    setConstantWithUnits(material, "star.energy.SpecificHeatProperty", {coolant.specific_heat_j_per_kg_k:.12g}, specificHeatUnit, "Specific Heat");
-    setConstantWithUnits(material, "star.energy.ThermalConductivityProperty", {coolant.thermal_conductivity_w_per_m_k:.12g}, conductivityUnit, "Thermal Conductivity");
-    setConstantWithUnits(material, "star.flow.DynamicViscosityProperty", {coolant.dynamic_viscosity_kg_per_m_s:.12g}, viscosityUnit, "Dynamic Viscosity");
-    if (!setConstantWithUnits(material, "star.energy.PolynomialDensityProperty", {coolant.density_kg_per_m3:.12g}, densityUnit, "Polynomial Density")) {{
-      setConstantWithUnits(material, "star.flow.ConstantDensityProperty", {coolant.density_kg_per_m3:.12g}, densityUnit, "Constant Density");
+    setConstantWithUnitsOrDefault(material, "star.energy.SpecificHeatProperty", {coolant.specific_heat_j_per_kg_k:.12g}, "J/kg-K", {coolant.specific_heat_j_per_kg_k:.12g}, "Specific Heat");
+    setConstantWithUnitsOrDefault(material, "star.energy.ThermalConductivityProperty", {coolant.thermal_conductivity_w_per_m_k:.12g}, "W/m-K", {coolant.thermal_conductivity_w_per_m_k:.12g}, "Thermal Conductivity");
+    setConstantWithUnitsOrDefault(material, "star.flow.DynamicViscosityProperty", {coolant.dynamic_viscosity_kg_per_m_s:.12g}, "Pa-s", {coolant.dynamic_viscosity_kg_per_m_s:.12g}, "Dynamic Viscosity");
+    if (!setConstantWithUnitsOrDefault(material, "star.energy.PolynomialDensityProperty", {coolant.density_kg_per_m3:.12g}, "kg/m^3", {coolant.density_kg_per_m3:.12g}, "Polynomial Density")) {{
+      setConstantWithUnitsOrDefault(material, "star.flow.ConstantDensityProperty", {coolant.density_kg_per_m3:.12g}, "kg/m^3", {coolant.density_kg_per_m3:.12g}, "Constant Density");
     }}
     sim.println("[refprop-to-ccm] Coolant table temperature C = {coolant.temperature_c:.12g}");
+    writeApplySummary();
     sim.println("[refprop-to-ccm] Saving simulation as: " + OUTPUT_SIM);
     sim.saveState(OUTPUT_SIM);
   }}
@@ -335,19 +335,47 @@ public class apply_coolant_to_star extends StarMacro {{
     return null;
   }}
 
-  private boolean setConstantWithUnits(Material material, String propertyClassName, double value, Units units, String label) {{
+  private boolean setConstantWithUnitsOrDefault(Material material, String propertyClassName, double value, String unitName, double defaultUnitValue, String label) {{
     try {{
       Class propertyClass = Class.forName(propertyClassName);
       MaterialProperty property = (MaterialProperty) material.getMaterialProperties().getMaterialProperty(propertyClass);
-      property.setConstant(value);
+      property.setConstant(defaultUnitValue);
       MaterialPropertyMethod method = property.getMethod();
       Object quantity = method.getClass().getMethod("getQuantity").invoke(method);
-      quantity.getClass().getMethod("setValueAndUnits", double.class, Units.class).invoke(quantity, value, units);
-      sim.println("[refprop-to-ccm] Set " + label + " = " + value + " " + units.toString());
+      try {{
+        Units units = (Units) sim.getUnitsManager().getObject(unitName);
+        quantity.getClass().getMethod("setValueAndUnits", double.class, Units.class).invoke(quantity, value, units);
+        recordSuccess(label + " = " + value + " " + unitName + " (explicit unit)");
+        return true;
+      }} catch (Throwable unitEx) {{
+        sim.println("[refprop-to-ccm] Explicit unit write failed for " + label + " via " + propertyClassName + "; trying fallback default-unit numeric value = " + defaultUnitValue + ": " + unitEx.getMessage());
+      }}
+      quantity.getClass().getMethod("setValue", double.class).invoke(quantity, defaultUnitValue);
+      recordSuccess(label + " = " + defaultUnitValue + " (fallback default-unit numeric value; source " + value + " " + unitName + ")");
       return true;
     }} catch (Throwable ex) {{
-      sim.println("[refprop-to-ccm] Could not set " + label + " with units via " + propertyClassName + ": " + ex.getMessage());
+      recordFailure(label + " via " + propertyClassName + ": " + ex.getMessage());
       return false;
+    }}
+  }}
+
+  private void recordSuccess(String detail) {{
+    successfulWrites.add(detail);
+    sim.println("[refprop-to-ccm] SUCCESS: " + detail);
+  }}
+
+  private void recordFailure(String detail) {{
+    failedWrites.add(detail);
+    sim.println("[refprop-to-ccm] FAILED: " + detail);
+  }}
+
+  private void writeApplySummary() {{
+    sim.println("[refprop-to-ccm] Apply summary: succeeded=" + successfulWrites.size() + ", failed=" + failedWrites.size());
+    for (String detail : successfulWrites) {{
+      sim.println("[refprop-to-ccm]   SUCCESS: " + detail);
+    }}
+    for (String detail : failedWrites) {{
+      sim.println("[refprop-to-ccm]   FAILED: " + detail);
     }}
   }}
 }}
@@ -362,6 +390,9 @@ def render_inlet_conditions_macro(
     return f"""// Auto-generated by refprop-to-ccm. Applies inlet conditions from generated workbook outputs.
 package macro;
 
+import java.util.ArrayList;
+import java.util.List;
+
 import star.common.*;
 import star.flow.*;
 import star.material.*;
@@ -369,6 +400,8 @@ import star.base.neo.DoubleVector;
 
 public class apply_inlet_conditions_to_star extends StarMacro {{
   private Simulation sim;
+  private final List<String> successfulWrites = new ArrayList<String>();
+  private final List<String> failedWrites = new ArrayList<String>();
 
   private static final String OUTPUT_SIM = "{_java(str(config.output_sim_file))}";
   private static final String CONTINUUM_NAME = "{_java(config.continuum_name)}";
@@ -393,23 +426,23 @@ public class apply_inlet_conditions_to_star extends StarMacro {{
 
   public void execute() {{
     sim = getActiveSimulation();
-    Units celsiusUnit = (Units) sim.getUnitsManager().getObject("C");
-    Units massFlowUnit = (Units) sim.getUnitsManager().getObject("kg/s");
     Boundary coolantBoundary = getBoundary("coolant", CoolantTarget.REGION_NAME, CoolantTarget.BOUNDARY_NAME);
     sim.println("[refprop-to-ccm] Coolant single-plate mass flow kg/s = " + CoolantTarget.SINGLE_PLATE_MASS_FLOW_KG_S);
     sim.println("[refprop-to-ccm] Coolant inlet temperature C = " + CoolantTarget.INLET_TEMPERATURE_C);
-    requireBoundaryScalarAny(
+    setBoundaryScalarAny(
       coolantBoundary,
       new String[] {{"star.flow.MassFlowRateProfile"}},
       CoolantTarget.SINGLE_PLATE_MASS_FLOW_KG_S,
-      massFlowUnit,
+      "kg/s",
+      CoolantTarget.SINGLE_PLATE_MASS_FLOW_KG_S,
       "coolant mass flow"
     );
     setBoundaryScalarAny(
       coolantBoundary,
       new String[] {{"star.energy.StaticTemperatureProfile", "star.energy.TotalTemperatureProfile", "star.energy.TemperatureProfile"}},
       CoolantTarget.INLET_TEMPERATURE_C,
-      celsiusUnit,
+      "C",
+      {coolant.inlet_temperature_c + 273.15:.12g},
       "coolant inlet temperature"
     );
 
@@ -417,22 +450,25 @@ public class apply_inlet_conditions_to_star extends StarMacro {{
     sim.println("[refprop-to-ccm] Refrigerant single-layer mass flow kg/s = " + RefrigerantTarget.SINGLE_LAYER_MASS_FLOW_KG_S);
     sim.println("[refprop-to-ccm] Refrigerant inlet temperature C = " + RefrigerantTarget.INLET_TEMPERATURE_C);
     sim.println("[refprop-to-ccm] Refrigerant phase fractions: " + LIQUID_PHASE_NAME + "=" + RefrigerantTarget.LIQUID_VOLUME_FRACTION + ", " + VAPOR_PHASE_NAME + "=" + RefrigerantTarget.VAPOR_VOLUME_FRACTION);
-    requireBoundaryScalarAny(
+    setBoundaryScalarAny(
       refrigerantBoundary,
       new String[] {{"star.flow.MassFlowRateProfile"}},
       RefrigerantTarget.SINGLE_LAYER_MASS_FLOW_KG_S,
-      massFlowUnit,
+      "kg/s",
+      RefrigerantTarget.SINGLE_LAYER_MASS_FLOW_KG_S,
       "refrigerant mass flow"
     );
     setBoundaryScalarAny(
       refrigerantBoundary,
       new String[] {{"star.energy.StaticTemperatureProfile", "star.energy.TotalTemperatureProfile", "star.energy.TemperatureProfile"}},
       RefrigerantTarget.INLET_TEMPERATURE_C,
-      celsiusUnit,
+      "C",
+      {refrigerant.inlet_temperature_c + 273.15:.12g},
       "refrigerant inlet temperature"
     );
     setVolumeFraction(refrigerantBoundary, CONTINUUM_NAME, LIQUID_PHASE_NAME, VAPOR_PHASE_NAME, RefrigerantTarget.LIQUID_VOLUME_FRACTION, RefrigerantTarget.VAPOR_VOLUME_FRACTION);
 
+    writeApplySummary();
     sim.println("[refprop-to-ccm] Saving simulation as: " + OUTPUT_SIM);
     sim.saveState(OUTPUT_SIM);
   }}
@@ -445,10 +481,15 @@ def render_coolant_inlet_condition_macro(config: StarApplyConfig, coolant: Coola
     return f"""// Auto-generated by refprop-to-ccm. Applies coolant inlet condition.
 package macro;
 
+import java.util.ArrayList;
+import java.util.List;
+
 import star.common.*;
 
 public class apply_coolant_inlet_to_star extends StarMacro {{
   private Simulation sim;
+  private final List<String> successfulWrites = new ArrayList<String>();
+  private final List<String> failedWrites = new ArrayList<String>();
 
   private static final String OUTPUT_SIM = "{_java(str(config.output_sim_file))}";
   private static final String REGION_NAME = "{_java(config.coolant_region_name)}";
@@ -458,13 +499,12 @@ public class apply_coolant_inlet_to_star extends StarMacro {{
 
   public void execute() {{
     sim = getActiveSimulation();
-    Units celsiusUnit = (Units) sim.getUnitsManager().getObject("C");
-    Units massFlowUnit = (Units) sim.getUnitsManager().getObject("kg/s");
     Boundary boundary = getBoundary("coolant", REGION_NAME, BOUNDARY_NAME);
     sim.println("[refprop-to-ccm] Coolant single-plate mass flow kg/s = " + MASS_FLOW_KG_S);
     sim.println("[refprop-to-ccm] Coolant inlet temperature C = " + INLET_TEMPERATURE_C);
-    requireBoundaryScalarAny(boundary, new String[] {{"star.flow.MassFlowRateProfile"}}, MASS_FLOW_KG_S, massFlowUnit, "coolant mass flow");
-    setBoundaryScalarAny(boundary, new String[] {{"star.energy.StaticTemperatureProfile", "star.energy.TotalTemperatureProfile", "star.energy.TemperatureProfile"}}, INLET_TEMPERATURE_C, celsiusUnit, "coolant inlet temperature");
+    setBoundaryScalarAny(boundary, new String[] {{"star.flow.MassFlowRateProfile"}}, MASS_FLOW_KG_S, "kg/s", MASS_FLOW_KG_S, "coolant mass flow");
+    setBoundaryScalarAny(boundary, new String[] {{"star.energy.StaticTemperatureProfile", "star.energy.TotalTemperatureProfile", "star.energy.TemperatureProfile"}}, INLET_TEMPERATURE_C, "C", {coolant.inlet_temperature_c + 273.15:.12g}, "coolant inlet temperature");
+    writeApplySummary();
     sim.println("[refprop-to-ccm] Saving simulation as: " + OUTPUT_SIM);
     sim.saveState(OUTPUT_SIM);
   }}
@@ -477,6 +517,9 @@ def render_refrigerant_inlet_condition_macro(config: StarApplyConfig, refrigeran
     return f"""// Auto-generated by refprop-to-ccm. Applies refrigerant inlet condition.
 package macro;
 
+import java.util.ArrayList;
+import java.util.List;
+
 import star.common.*;
 import star.flow.*;
 import star.material.*;
@@ -484,6 +527,8 @@ import star.base.neo.DoubleVector;
 
 public class apply_refrigerant_inlet_to_star extends StarMacro {{
   private Simulation sim;
+  private final List<String> successfulWrites = new ArrayList<String>();
+  private final List<String> failedWrites = new ArrayList<String>();
 
   private static final String OUTPUT_SIM = "{_java(str(config.output_sim_file))}";
   private static final String CONTINUUM_NAME = "{_java(config.continuum_name)}";
@@ -498,15 +543,14 @@ public class apply_refrigerant_inlet_to_star extends StarMacro {{
 
   public void execute() {{
     sim = getActiveSimulation();
-    Units celsiusUnit = (Units) sim.getUnitsManager().getObject("C");
-    Units massFlowUnit = (Units) sim.getUnitsManager().getObject("kg/s");
     Boundary boundary = getBoundary("refrigerant", REGION_NAME, BOUNDARY_NAME);
     sim.println("[refprop-to-ccm] Refrigerant single-layer mass flow kg/s = " + MASS_FLOW_KG_S);
     sim.println("[refprop-to-ccm] Refrigerant inlet temperature C = " + INLET_TEMPERATURE_C);
     sim.println("[refprop-to-ccm] Refrigerant phase fractions: " + LIQUID_PHASE_NAME + "=" + LIQUID_VOLUME_FRACTION + ", " + VAPOR_PHASE_NAME + "=" + VAPOR_VOLUME_FRACTION);
-    requireBoundaryScalarAny(boundary, new String[] {{"star.flow.MassFlowRateProfile"}}, MASS_FLOW_KG_S, massFlowUnit, "refrigerant mass flow");
-    setBoundaryScalarAny(boundary, new String[] {{"star.energy.StaticTemperatureProfile", "star.energy.TotalTemperatureProfile", "star.energy.TemperatureProfile"}}, INLET_TEMPERATURE_C, celsiusUnit, "refrigerant inlet temperature");
+    setBoundaryScalarAny(boundary, new String[] {{"star.flow.MassFlowRateProfile"}}, MASS_FLOW_KG_S, "kg/s", MASS_FLOW_KG_S, "refrigerant mass flow");
+    setBoundaryScalarAny(boundary, new String[] {{"star.energy.StaticTemperatureProfile", "star.energy.TotalTemperatureProfile", "star.energy.TemperatureProfile"}}, INLET_TEMPERATURE_C, "C", {refrigerant.inlet_temperature_c + 273.15:.12g}, "refrigerant inlet temperature");
     setVolumeFraction(boundary, CONTINUUM_NAME, LIQUID_PHASE_NAME, VAPOR_PHASE_NAME, LIQUID_VOLUME_FRACTION, VAPOR_VOLUME_FRACTION);
+    writeApplySummary();
     sim.println("[refprop-to-ccm] Saving simulation as: " + OUTPUT_SIM);
     sim.saveState(OUTPUT_SIM);
   }}
@@ -674,13 +718,12 @@ def _boundary_macro_helpers(*, include_volume_fraction: bool = True) -> str:
       }
       VolumeFractionProfile profile = boundary.getValues().get(VolumeFractionProfile.class);
       profile.getMethod(ConstantArrayProfileMethod.class).getQuantity().setArray(new DoubleVector(orderedFractions));
-      sim.println(
-        "[refprop-to-ccm] Set volume fractions in continuum order: " +
+      recordSuccess(
+        "Set volume fractions in continuum order: " +
         multiphase.getPhaseManager().getObjects().toString() + " = " + new DoubleVector(orderedFractions).toString()
       );
     } catch (Throwable ex) {
-      sim.println("[refprop-to-ccm] Volume fraction write skipped: " + ex.getMessage());
-      throw new RuntimeException("Stop saving because refrigerant volume fraction could not be set from continuum phases.", ex);
+      recordFailure("Volume fraction write skipped: " + ex.getMessage());
     }
   }
 """ if include_volume_fraction else ""
@@ -697,23 +740,17 @@ def _boundary_macro_helpers(*, include_volume_fraction: bool = True) -> str:
     return boundary;
   }
 
-  private boolean setBoundaryScalarAny(Boundary boundary, String[] profileClassNames, double value, Units units, String label) {
+  private boolean setBoundaryScalarAny(Boundary boundary, String[] profileClassNames, double value, String unitName, double defaultUnitValue, String label) {
     for (String profileClassName : profileClassNames) {
-      if (setBoundaryScalar(boundary, profileClassName, value, units, label)) {
+      if (setBoundaryScalar(boundary, profileClassName, value, unitName, defaultUnitValue, label)) {
         return true;
       }
     }
-    sim.println("[refprop-to-ccm] Could not set " + label + " on boundary " + boundary.getPresentationName());
+    recordFailure("Could not set " + label + " on boundary " + boundary.getPresentationName());
     return false;
   }
 
-  private void requireBoundaryScalarAny(Boundary boundary, String[] profileClassNames, double value, Units units, String label) {
-    if (!setBoundaryScalarAny(boundary, profileClassNames, value, units, label)) {
-      throw new RuntimeException("Stop saving because " + label + " could not be set with explicit units.");
-    }
-  }
-
-  private boolean setBoundaryScalar(Boundary boundary, String profileClassName, double value, Units units, String label) {
+  private boolean setBoundaryScalar(Boundary boundary, String profileClassName, double value, String unitName, double defaultUnitValue, String label) {
     try {
       Class profileClass = Class.forName(profileClassName);
       Object profile = boundary.getValues().get(profileClass);
@@ -724,12 +761,40 @@ def _boundary_macro_helpers(*, include_volume_fraction: bool = True) -> str:
       profile.getClass().getMethod("setMethod", Class.class).invoke(profile, methodClass);
       Object method = profile.getClass().getMethod("getMethod", Class.class).invoke(profile, methodClass);
       Object quantity = method.getClass().getMethod("getQuantity").invoke(method);
-      quantity.getClass().getMethod("setValueAndUnits", double.class, Units.class).invoke(quantity, value, units);
-      sim.println("[refprop-to-ccm] Set " + label + " via " + profileClassName + " = " + value + (units != null ? (" " + units.toString()) : ""));
+      try {
+        Units units = (Units) sim.getUnitsManager().getObject(unitName);
+        quantity.getClass().getMethod("setValueAndUnits", double.class, Units.class).invoke(quantity, value, units);
+        recordSuccess(label + " via " + profileClassName + " = " + value + " " + unitName + " (explicit unit)");
+        return true;
+      } catch (Throwable unitEx) {
+        sim.println("[refprop-to-ccm] Explicit unit write failed for " + label + " via " + profileClassName + "; trying fallback default-unit numeric value = " + defaultUnitValue + ": " + unitEx.getMessage());
+      }
+      quantity.getClass().getMethod("setValue", double.class).invoke(quantity, defaultUnitValue);
+      recordSuccess(label + " via " + profileClassName + " = " + defaultUnitValue + " (fallback default-unit numeric value; source " + value + " " + unitName + ")");
       return true;
     } catch (Throwable ex) {
       sim.println("[refprop-to-ccm] Boundary scalar write skipped for " + label + " via " + profileClassName + ": " + ex.getMessage());
       return false;
+    }
+  }
+
+  private void recordSuccess(String detail) {
+    successfulWrites.add(detail);
+    sim.println("[refprop-to-ccm] SUCCESS: " + detail);
+  }
+
+  private void recordFailure(String detail) {
+    failedWrites.add(detail);
+    sim.println("[refprop-to-ccm] FAILED: " + detail);
+  }
+
+  private void writeApplySummary() {
+    sim.println("[refprop-to-ccm] Apply summary: succeeded=" + successfulWrites.size() + ", failed=" + failedWrites.size());
+    for (String detail : successfulWrites) {
+      sim.println("[refprop-to-ccm]   SUCCESS: " + detail);
+    }
+    for (String detail : failedWrites) {
+      sim.println("[refprop-to-ccm]   FAILED: " + detail);
     }
   }
 
