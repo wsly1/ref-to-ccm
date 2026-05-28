@@ -48,6 +48,7 @@ public class apply_refprop_to_star extends StarMacro {{
   private Simulation sim;
   private final List<String> successfulWrites = new ArrayList<String>();
   private final List<String> failedWrites = new ArrayList<String>();
+  private final List<String> skippedWrites = new ArrayList<String>();
 
   private static final String CONTINUUM_NAME = "{_java(config.continuum_name)}";
   private static final String LIQUID_PHASE_NAME = "{_java(config.liquid_phase_name)}";
@@ -198,23 +199,37 @@ public class apply_refprop_to_star extends StarMacro {{
     setConstantWithUnitsOrDefault(material, "star.energy.StandardStateTemperatureProperty", {standard_state_temperature_c:.12g}, "C", {liquid.standard_state_temperature_k:.12g}, "Standard State Temperature");
     setConstantWithUnitsOrDefault(material, "star.energy.ThermalConductivityProperty", {liquid.thermal_conductivity_w_per_m_k:.12g}, "W/m-K", {liquid.thermal_conductivity_w_per_m_k:.12g}, "Thermal Conductivity");
     setConstantWithUnitsOrDefault(material, "star.flow.DynamicViscosityProperty", {liquid.dynamic_viscosity_pa_s:.12g}, "Pa-s", {liquid.dynamic_viscosity_pa_s:.12g}, "Dynamic Viscosity");
-    if (!setConstantWithUnitsOrDefault(material, "star.userdefinedeos.UserDefinedDensityProperty", {liquid.density_kg_per_m3:.12g}, "kg/m^3", {liquid.density_kg_per_m3:.12g}, "Liquid User-defined EOS Density")) {{
-      if (!setConstantWithUnitsOrDefault(material, "star.energy.PolynomialDensityProperty", {liquid.density_kg_per_m3:.12g}, "kg/m^3", {liquid.density_kg_per_m3:.12g}, "Polynomial Density")) {{
-        setConstantWithUnitsOrDefault(material, "star.flow.ConstantDensityProperty", {liquid.density_kg_per_m3:.12g}, "kg/m^3", {liquid.density_kg_per_m3:.12g}, "Constant Density");
+    if (!setConstantWithUnitsOrDefault(material, "star.userdefinedeos.UserDefinedDensityProperty", {liquid.density_kg_per_m3:.12g}, "kg/m^3", {liquid.density_kg_per_m3:.12g}, "Liquid User-defined EOS Density", false)) {{
+      if (!setConstantWithUnitsOrDefault(material, "star.energy.PolynomialDensityProperty", {liquid.density_kg_per_m3:.12g}, "kg/m^3", {liquid.density_kg_per_m3:.12g}, "Polynomial Density", false)) {{
+        if (!setConstantWithUnitsOrDefault(material, "star.flow.ConstantDensityProperty", {liquid.density_kg_per_m3:.12g}, "kg/m^3", {liquid.density_kg_per_m3:.12g}, "Constant Density", false)) {{
+          recordFailure("Density could not be set with any supported material property.");
+        }}
       }}
     }}
-    setConstantWithUnitsOrDefault(material, "star.userdefinedeos.UserDefinedDrhoDTProperty", {liquid.density_temperature_derivative_kg_per_m3_k:.12g}, "kg/m^3-K", {liquid.density_temperature_derivative_kg_per_m3_k:.12g}, "Liquid Density Temperature Derivative");
+    if (!setConstantWithUnitsOrDefault(material, "star.userdefinedeos.UserDefinedDrhoDTProperty", {liquid.density_temperature_derivative_kg_per_m3_k:.12g}, "kg/m^3-K", {liquid.density_temperature_derivative_kg_per_m3_k:.12g}, "Liquid Density Temperature Derivative", false)) {{
+      if (Math.abs({liquid.density_temperature_derivative_kg_per_m3_k:.12g}) < 1.0e-20) {{
+        recordSkipped("Liquid Density Temperature Derivative not available on target material; source value is 0 so it was skipped.");
+      }} else {{
+        recordFailure("Liquid Density Temperature Derivative could not be set because target material does not expose UserDefinedDrhoDTProperty.");
+      }}
+    }}
     setConstantWithUnitsOrDefault(material, "star.material.MolecularWeightProperty", {liquid.molecular_weight_kg_per_kmol:.12g}, "kg/kmol", {liquid.molecular_weight_kg_per_kmol:.12g}, "Molecular Weight");
     setConstantWithUnitsOrDefault(material, "star.energy.HeatOfFormationProperty", {liquid.liquid_standard_state_enthalpy_j_per_kg:.12g}, "J/kg", {liquid.liquid_standard_state_enthalpy_j_per_kg:.12g}, "Heat of Formation");
     if ("table".equals(LIQUID_PROPERTY_MODE) && table != null) {{
       sim.println("[refprop-to-ccm] Applying liquid temperature table to " + material.getPresentationName());
       setTemperatureTable(material, table, "star.energy.SpecificHeatProperty", "star.energy.SpecificHeatTemperatureTable", "Equivalent Specific Heat", "Equivalent Specific Heat", "Liquid Specific Heat");
-      if (!setTemperatureTable(material, table, "star.userdefinedeos.UserDefinedDensityProperty", "star.energy.TemperatureTableMethod", "Density", "Density", "Liquid User-defined EOS Density")) {{
-        if (!setTemperatureTable(material, table, "star.energy.PolynomialDensityProperty", "star.energy.DensityTemperatureTableDT", "Density", "Density", "Liquid Density")) {{
-          setTemperatureTable(material, table, "star.flow.ConstantDensityProperty", "star.energy.DensityTemperatureTableDT", "Density", "Density", "Liquid Constant Density fallback");
+      if (!setTemperatureTable(material, table, "star.userdefinedeos.UserDefinedDensityProperty", "star.energy.TemperatureTableMethod", "Density", "Density", "Liquid User-defined EOS Density", false)) {{
+        if (!setTemperatureTable(material, table, "star.energy.PolynomialDensityProperty", "star.energy.DensityTemperatureTableDT", "Density", "Density", "Liquid Density", false)) {{
+          if (!setTemperatureTable(material, table, "star.energy.PolynomialDensityProperty", "star.energy.TemperatureTableMethod", "Density", "Density", "Liquid Density", false)) {{
+            if (!setTemperatureTable(material, table, "star.flow.ConstantDensityProperty", "star.energy.DensityTemperatureTableDT", "Density", "Density", "Liquid Constant Density fallback", false)) {{
+              recordFailure("Liquid Density table could not be bound; target liquid material does not expose a supported density table method.");
+            }}
+          }}
         }}
       }}
-      setTemperatureTable(material, table, "star.userdefinedeos.UserDefinedEnthalpyProperty", "star.energy.EnthalpyTemperatureTable", "Enthalpy", "Enthalpy", "Liquid User-defined EOS Enthalpy");
+      if (!setTemperatureTable(material, table, "star.userdefinedeos.UserDefinedEnthalpyProperty", "star.energy.EnthalpyTemperatureTable", "Enthalpy", "Enthalpy", "Liquid User-defined EOS Enthalpy", false)) {{
+        recordFailure("Liquid User-defined EOS Enthalpy table could not be bound; target liquid material does not expose UserDefinedEnthalpyProperty.");
+      }}
       setTemperatureTable(material, table, "star.energy.ThermalConductivityProperty", "star.energy.TemperatureTableMethod", "Equivalent Thermal Conductivity", "Equivalent Thermal Conductivity", "Liquid Thermal Conductivity");
       setTemperatureTable(material, table, "star.flow.DynamicViscosityProperty", "star.energy.TemperatureTableMethod", "Equivalent Dynamic Viscosity", "Equivalent Dynamic Viscosity", "Liquid Dynamic Viscosity");
     }}
@@ -226,12 +241,22 @@ public class apply_refprop_to_star extends StarMacro {{
     setConstantWithUnitsOrDefault(material, "star.energy.StandardStateTemperatureProperty", {standard_state_temperature_c:.12g}, "C", {liquid.standard_state_temperature_k:.12g}, "Standard State Temperature");
 {vapor_entropy_assignment.rstrip()}
     setConstantWithUnitsOrDefault(material, "star.material.MolecularWeightProperty", {liquid.molecular_weight_kg_per_kmol:.12g}, "kg/kmol", {liquid.molecular_weight_kg_per_kmol:.12g}, "Molecular Weight");
-    setConstantWithUnitsOrDefault(material, "star.userdefinedeos.UserDefinedDrhoDTProperty", {liquid.density_temperature_derivative_kg_per_m3_k:.12g}, "kg/m^3-K", {liquid.density_temperature_derivative_kg_per_m3_k:.12g}, "Density Temperature Derivative");
+    if (!setConstantWithUnitsOrDefault(material, "star.userdefinedeos.UserDefinedDrhoDTProperty", {liquid.density_temperature_derivative_kg_per_m3_k:.12g}, "kg/m^3-K", {liquid.density_temperature_derivative_kg_per_m3_k:.12g}, "Density Temperature Derivative", false)) {{
+      if (Math.abs({liquid.density_temperature_derivative_kg_per_m3_k:.12g}) < 1.0e-20) {{
+        recordSkipped("Density Temperature Derivative not available on target vapor material; source value is 0 so it was skipped.");
+      }} else {{
+        recordFailure("Density Temperature Derivative could not be set because target vapor material does not expose UserDefinedDrhoDTProperty.");
+      }}
+    }}
     setConstantWithUnitsOrDefault(material, "star.energy.HeatOfFormationProperty", {liquid.vapor_standard_state_enthalpy_j_per_kg:.12g}, "J/kg", {liquid.vapor_standard_state_enthalpy_j_per_kg:.12g}, "Heat of Formation");
 
-    if (!setTemperatureTable(material, table, "star.userdefinedeos.UserDefinedDensityProperty", "star.energy.TemperatureTableMethod", "Density", "Density", "User-defined EOS Density")) {{
-      if (!setTemperatureTable(material, table, "star.energy.PolynomialDensityProperty", "star.energy.DensityTemperatureTableDT", "Density", "Density", "Density")) {{
-        setTemperatureTable(material, table, "star.flow.ConstantDensityProperty", "star.energy.DensityTemperatureTableDT", "Density", "Density", "Constant Density fallback");
+    if (!setTemperatureTable(material, table, "star.userdefinedeos.UserDefinedDensityProperty", "star.energy.TemperatureTableMethod", "Density", "Density", "User-defined EOS Density", false)) {{
+      if (!setTemperatureTable(material, table, "star.energy.PolynomialDensityProperty", "star.energy.DensityTemperatureTableDT", "Density", "Density", "Density", false)) {{
+        if (!setTemperatureTable(material, table, "star.energy.PolynomialDensityProperty", "star.energy.TemperatureTableMethod", "Density", "Density", "Density", false)) {{
+          if (!setTemperatureTable(material, table, "star.flow.ConstantDensityProperty", "star.energy.DensityTemperatureTableDT", "Density", "Density", "Constant Density fallback", false)) {{
+            recordFailure("Vapor Density table could not be bound; target vapor material does not expose a supported density table method.");
+          }}
+        }}
       }}
     }}
     setVaporEnthalpyAndSpecificHeat(material, table);
@@ -240,17 +265,27 @@ public class apply_refprop_to_star extends StarMacro {{
   }}
 
   private void setVaporEnthalpyAndSpecificHeat(Material material, Table table) {{
-    boolean enthalpyBound = setTemperatureTable(material, table, "star.userdefinedeos.UserDefinedEnthalpyProperty", "star.energy.EnthalpyTemperatureTable", "Enthalpy", "Enthalpy", "User-defined EOS Enthalpy");
+    boolean enthalpyBound = setTemperatureTable(material, table, "star.userdefinedeos.UserDefinedEnthalpyProperty", "star.energy.EnthalpyTemperatureTable", "Enthalpy", "Enthalpy", "User-defined EOS Enthalpy", false);
     if ("enthalpy_table".equals(VAPOR_SPECIFIC_HEAT_SOURCE)) {{
       if (enthalpyBound) {{
         sim.println("[refprop-to-ccm] Using user-defined EOS enthalpy table as vapor specific heat source.");
+      }} else {{
+        recordFailure("User-defined EOS Enthalpy table could not be bound; target vapor material does not expose UserDefinedEnthalpyProperty.");
       }}
       return;
     }}
-    setTemperatureTable(material, table, "star.energy.SpecificHeatProperty", "star.userdefinedeos.UserDefinedSpecificHeatTemperatureTable", "Equivalent Specific Heat", "Equivalent Specific Heat", "User-defined EOS Specific Heat Cp(T)");
+    if (!setTemperatureTable(material, table, "star.energy.SpecificHeatProperty", "star.userdefinedeos.UserDefinedSpecificHeatTemperatureTable", "Equivalent Specific Heat", "Equivalent Specific Heat", "User-defined EOS Specific Heat Cp(T)", false)) {{
+      if (!setTemperatureTable(material, table, "star.energy.SpecificHeatProperty", "star.energy.SpecificHeatTemperatureTable", "Equivalent Specific Heat", "Equivalent Specific Heat", "Specific Heat Cp(T)", false)) {{
+        recordFailure("Vapor Specific Heat Cp(T) table could not be bound; target vapor material does not expose a supported specific heat table method.");
+      }}
+    }}
   }}
 
   private boolean setConstantWithUnitsOrDefault(Material material, String propertyClassName, double value, String unitName, double defaultUnitValue, String label) {{
+    return setConstantWithUnitsOrDefault(material, propertyClassName, value, unitName, defaultUnitValue, label, true);
+  }}
+
+  private boolean setConstantWithUnitsOrDefault(Material material, String propertyClassName, double value, String unitName, double defaultUnitValue, String label, boolean recordFailureOnError) {{
     try {{
       Class propertyClass = Class.forName(propertyClassName);
       MaterialProperty property = (MaterialProperty) material.getMaterialProperties().getMaterialProperty(propertyClass);
@@ -269,12 +304,20 @@ public class apply_refprop_to_star extends StarMacro {{
       recordSuccess(label + " = " + defaultUnitValue + " (fallback default-unit numeric value; source " + value + " " + unitName + ")");
       return true;
     }} catch (Throwable ex) {{
-      recordFailure(label + " via " + propertyClassName + ": " + ex.getMessage());
+      if (recordFailureOnError) {{
+        recordFailure(label + " via " + propertyClassName + ": " + ex.getMessage());
+      }} else {{
+        sim.println("[refprop-to-ccm] Candidate constant write skipped for " + label + " via " + propertyClassName + ": " + ex.getMessage());
+      }}
       return false;
     }}
   }}
 
   private boolean setTemperatureTable(Material material, Table table, String propertyClassName, String methodClassName, String dataColumn, String fallbackDataColumn, String label) {{
+    return setTemperatureTable(material, table, propertyClassName, methodClassName, dataColumn, fallbackDataColumn, label, true);
+  }}
+
+  private boolean setTemperatureTable(Material material, Table table, String propertyClassName, String methodClassName, String dataColumn, String fallbackDataColumn, String label, boolean recordFailureOnError) {{
     try {{
       Class propertyClass = Class.forName(propertyClassName);
       Class methodClass = Class.forName(methodClassName);
@@ -288,7 +331,11 @@ public class apply_refprop_to_star extends StarMacro {{
       recordSuccess("Bound " + label + " to table column: " + dataColumn + " / " + fallbackDataColumn);
       return true;
     }} catch (Throwable ex) {{
-      recordFailure("Could not bind " + label + " table via " + propertyClassName + " / " + methodClassName + ": " + ex.getMessage());
+      if (recordFailureOnError) {{
+        recordFailure("Could not bind " + label + " table via " + propertyClassName + " / " + methodClassName + ": " + ex.getMessage());
+      }} else {{
+        sim.println("[refprop-to-ccm] Candidate table binding skipped for " + label + " via " + propertyClassName + " / " + methodClassName + ": " + ex.getMessage());
+      }}
       return false;
     }}
   }}
@@ -303,13 +350,21 @@ public class apply_refprop_to_star extends StarMacro {{
     sim.println("[refprop-to-ccm] FAILED: " + detail);
   }}
 
+  private void recordSkipped(String detail) {{
+    skippedWrites.add(detail);
+    sim.println("[refprop-to-ccm] SKIPPED: " + detail);
+  }}
+
   private void writeApplySummary() {{
-    sim.println("[refprop-to-ccm] Apply summary: succeeded=" + successfulWrites.size() + ", failed=" + failedWrites.size());
+    sim.println("[refprop-to-ccm] Apply summary: succeeded=" + successfulWrites.size() + ", failed=" + failedWrites.size() + ", skipped=" + skippedWrites.size());
     for (String detail : successfulWrites) {{
       sim.println("[refprop-to-ccm]   SUCCESS: " + detail);
     }}
     for (String detail : failedWrites) {{
       sim.println("[refprop-to-ccm]   FAILED: " + detail);
+    }}
+    for (String detail : skippedWrites) {{
+      sim.println("[refprop-to-ccm]   SKIPPED: " + detail);
     }}
   }}
 

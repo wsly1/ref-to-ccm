@@ -11,6 +11,7 @@ from .units import k_to_c
 ALLOWED_REFPROP_WARNINGS = {-319, -320, -113}
 EPSILON = 1.0e-10
 TEMPERATURE_EPSILON = 1.0e-6
+MAX_ABS_SPECIFIC_ENTROPY_J_PER_KG_K = 1.0e7
 
 
 class RefpropClient:
@@ -80,6 +81,8 @@ class RefpropClient:
         vapor_composition = list(getattr(sat, "y", self.z))
         props = self._properties_td(saturation.temperature_k, sat.Dl, liquid_composition)
         vapor_props = self._properties_td(saturation.temperature_k, sat.Dv, vapor_composition)
+        liquid_entropy = self._refprop_pq(saturation.pressure_pa, 0.0, "S")
+        vapor_entropy = self._refprop_pq(saturation.pressure_pa, 1.0, "S")
         return LiquidProperties(
             saturation_temperature_k=saturation.temperature_k,
             saturation_pressure_pa=saturation.pressure_pa,
@@ -100,8 +103,8 @@ class RefpropClient:
             heat_of_formation_input_j_per_kg=props["enthalpy"],
             vapor_heat_of_formation_input_j_per_kg=vapor_props["enthalpy"],
             density_temperature_derivative_kg_per_m3_k=0.0,
-            liquid_standard_state_entropy_j_per_kg_k=props["entropy"],
-            vapor_standard_state_entropy_j_per_kg_k=vapor_props["entropy"],
+            liquid_standard_state_entropy_j_per_kg_k=liquid_entropy,
+            vapor_standard_state_entropy_j_per_kg_k=vapor_entropy,
         )
 
     def enthalpy_tp(self, fluid_name: str, pressure_pa: float, temperature_k: float) -> float:
@@ -224,10 +227,10 @@ class RefpropClient:
         self.last_equivalent_quality_points = effective_quality_points
         replacement_samples: list[VaporRow] = []
         for quality in _linspace(0.0, 1.0, effective_quality_points):
-            actual_temperature_k, enthalpy_j_per_kg, density_kg_per_m3 = self._refprop_pq_outputs(
+            actual_temperature_k, enthalpy_j_per_kg, density_kg_per_m3, _entropy_j_per_kg_k = self._refprop_pq_outputs(
                 pressure_pa,
                 quality,
-                "T;H;D",
+                "T;H;D;S",
             )
             vapor_volume_fraction = _vapor_volume_fraction(quality, density_liq, density_vap)
             equivalent_thermal_conductivity = _equivalent_thermal_conductivity(
@@ -345,11 +348,13 @@ class RefpropClient:
         self._check(transport.ierr, transport.herr, "calculating transport properties")
         molecular_weight = self.rp.WMOLdll(composition)
         density_kg_m3 = density_mol_l * molecular_weight
+        entropy_j_per_kg_k = thermo.s * 1000.0 / molecular_weight
+        _validate_specific_entropy(entropy_j_per_kg_k, f"THERM state at T={temperature_k} K")
         return {
             "density": density_kg_m3,
             "cp": thermo.Cp * 1000.0 / molecular_weight,
             "enthalpy": thermo.h * 1000.0 / molecular_weight,
-            "entropy": thermo.s * 1000.0 / molecular_weight,
+            "entropy": entropy_j_per_kg_k,
             "thermal_conductivity": transport.tcx,
             "dynamic_viscosity": transport.eta * 1.0e-6,
             "molecular_weight": molecular_weight,
@@ -371,9 +376,13 @@ class RefpropClient:
             self.z,
         )
         self._check(result.ierr, result.herr, f"calculating PQ state ({outputs}) at P={pressure_pa} Pa, Q={quality}")
-        values = tuple(float(result.Output[index]) for index in range(len(outputs.split(";"))))
+        output_names = [output_name.strip().upper() for output_name in outputs.split(";")]
+        values = tuple(float(result.Output[index]) for index in range(len(output_names)))
         if any(math.isnan(value) for value in values):
             raise RuntimeError(f"REFPROP returned NaN while calculating PQ state ({outputs})")
+        for output_name, value in zip(output_names, values):
+            if output_name == "S":
+                _validate_specific_entropy(value, f"PQ state at P={pressure_pa} Pa, Q={quality}")
         return values
 
     @staticmethod
@@ -382,6 +391,16 @@ class RefpropClient:
             return
         if ierr != 0:
             raise RuntimeError(f"REFPROP error while {action}: {ierr} {herr}")
+
+
+def _validate_specific_entropy(value: float, context: str) -> None:
+    if not math.isfinite(value):
+        raise RuntimeError(f"REFPROP returned non-finite entropy while calculating {context}: {value}")
+    if abs(value) > MAX_ABS_SPECIFIC_ENTROPY_J_PER_KG_K:
+        raise RuntimeError(
+            f"REFPROP returned abnormal entropy while calculating {context}: "
+            f"{value} J/kg-K"
+        )
 
 
 def _as_fld_name(name: str) -> str:

@@ -1107,14 +1107,21 @@ class RefpropToCcmApp(tk.Tk):
         self._append_log(f"气相表格: {result.vapor_csv}")
         self._append_log(f"STAR宏: {result.macro_file}")
         partial_failure = False
+        star_summary_text = ""
         if result.star_log is not None:
             self._append_log(f"STAR运行日志: {result.star_log}")
-            partial_failure = self._append_star_write_summary(result.star_log)
+            partial_failure, star_summary_text = self._append_star_write_summary(result.star_log)
         if partial_failure:
             self.status_var.set("完成，但部分 STAR 参数写入失败")
-            messagebox.showwarning("部分写入失败", "物性文件已生成，但部分 STAR 参数未成功写入。请查看界面日志中的写入汇总。")
+            messagebox.showwarning(
+                "部分写入失败",
+                "物性文件已生成，但部分 STAR 参数未成功写入。\n\n" + star_summary_text,
+            )
         else:
-            messagebox.showinfo("完成", "物性文件和STAR宏已生成。")
+            message = "物性文件和STAR宏已生成。"
+            if star_summary_text:
+                message += "\n\n" + star_summary_text
+            messagebox.showinfo("完成", message)
 
     def _finish_error(self, exc: Exception) -> None:
         self.status_var.set("失败")
@@ -1258,26 +1265,52 @@ class RefpropToCcmApp(tk.Tk):
         self.log.insert("end", text + "\n")
         self.log.see("end")
 
-    def _append_star_write_summary(self, log_path: Path) -> bool:
+    def _append_star_write_summary(self, log_path: Path) -> tuple[bool, str]:
         try:
             lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
         except OSError as exc:
-            self._append_log(f"无法读取 STAR 写入结果汇总: {exc}")
-            return False
-        summary_lines = [
-            line
-            for line in lines
-            if "[refprop-to-ccm] Apply summary:" in line
-            or "[refprop-to-ccm]   SUCCESS:" in line
-            or "[refprop-to-ccm]   FAILED:" in line
-        ]
-        if not summary_lines:
-            self._append_log("STAR 日志中未找到参数写入汇总，请直接查看日志文件。")
-            return False
+            message = f"无法读取 STAR 写入结果汇总: {exc}"
+            self._append_log(message)
+            return False, message
+        summary_prefix = "[refprop-to-ccm] Apply summary:"
+        success_prefix = "[refprop-to-ccm]   SUCCESS:"
+        failed_prefix = "[refprop-to-ccm]   FAILED:"
+        skipped_prefix = "[refprop-to-ccm]   SKIPPED:"
+        summary_lines = [line for line in lines if summary_prefix in line]
+        success_lines = [line.split(success_prefix, 1)[1].strip() for line in lines if success_prefix in line]
+        failed_lines = [line.split(failed_prefix, 1)[1].strip() for line in lines if failed_prefix in line]
+        skipped_lines = [line.split(skipped_prefix, 1)[1].strip() for line in lines if skipped_prefix in line]
+        if not summary_lines and not success_lines and not failed_lines and not skipped_lines:
+            message = "STAR 日志中未找到参数写入汇总，请直接查看日志文件。"
+            self._append_log(message)
+            return False, message
         self._append_log("STAR 参数写入汇总:")
         for line in summary_lines:
             self._append_log(line)
-        return any("[refprop-to-ccm]   FAILED:" in line for line in summary_lines)
+        for line in success_lines:
+            self._append_log("[refprop-to-ccm]   SUCCESS: " + line)
+        for line in failed_lines:
+            self._append_log("[refprop-to-ccm]   FAILED: " + line)
+        for line in skipped_lines:
+            self._append_log("[refprop-to-ccm]   SKIPPED: " + line)
+        popup_lines = []
+        if summary_lines:
+            popup_lines.append(summary_lines[-1].split(summary_prefix, 1)[1].strip())
+        popup_lines.extend(RefpropToCcmApp._format_star_summary_section("成功", success_lines))
+        popup_lines.extend(RefpropToCcmApp._format_star_summary_section("失败", failed_lines))
+        popup_lines.extend(RefpropToCcmApp._format_star_summary_section("跳过", skipped_lines))
+        return bool(failed_lines), "\n".join(popup_lines)
+
+    @staticmethod
+    def _format_star_summary_section(title: str, rows: list[str]) -> list[str]:
+        if not rows:
+            return [f"{title}: 无"]
+        visible_limit = 20
+        section = [f"{title}:"]
+        section.extend(f"- {row}" for row in rows[:visible_limit])
+        if len(rows) > visible_limit:
+            section.append(f"- 其余 {len(rows) - visible_limit} 项已写入界面日志")
+        return section
 
     def _open_output_dir(self) -> None:
         directory = Path(self.vars["output_dir"].get().strip() or "out")
@@ -1508,18 +1541,22 @@ class RefpropToCcmApp(tk.Tk):
         self.star_apply_status_var.set(f"完成: {result.macro_file}")
         self._append_log(f"STAR 写入宏: {result.macro_file}")
         partial_failure = False
+        star_summary_text = ""
         if result.star_log is not None:
             self._append_log(f"STAR 写入日志: {result.star_log}")
-            partial_failure = self._append_star_write_summary(result.star_log)
+            partial_failure, star_summary_text = self._append_star_write_summary(result.star_log)
         if partial_failure:
             self.star_apply_status_var.set("完成，但部分 STAR 参数写入失败")
             messagebox.showwarning(
                 "部分写入失败",
-                f"STAR 写入流程已完成，但部分参数未成功写入。\n请查看界面日志中的写入汇总。\n\n宏文件:\n{result.macro_file}",
+                f"STAR 写入流程已完成，但部分参数未成功写入。\n\n{star_summary_text}\n\n宏文件:\n{result.macro_file}",
                 parent=self,
             )
         else:
-            messagebox.showinfo("完成", f"STAR 写入宏已生成:\n{result.macro_file}", parent=self)
+            message = f"STAR 写入宏已生成:\n{result.macro_file}"
+            if star_summary_text:
+                message += "\n\n" + star_summary_text
+            messagebox.showinfo("完成", message, parent=self)
 
     def _finish_star_apply_error(self, exc: Exception) -> None:
         self.star_apply_status_var.set("失败")
