@@ -8,6 +8,7 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
+from . import __version__
 from .config import ToolConfig
 from .core import generate_outputs, resolve_saturation, validate_gas_temperature_range, validate_liquid_temperature_range
 from .egasp_client import build_coolant_calculation, build_coolant_row
@@ -17,6 +18,14 @@ from .refprop_client import RefpropClient
 from .star_apply import StarApplyConfig, apply_star_from_outputs
 from .tables import write_coolant_xlsx
 from .units import k_to_c
+from .updater import (
+    ReleaseInfo,
+    UpdateError,
+    check_for_update,
+    current_executable_path,
+    download_release_asset,
+    install_update_and_restart,
+)
 
 SATURATION_TEMPERATURE_TOLERANCE_C = 1.0e-4
 
@@ -58,6 +67,8 @@ class RefpropToCcmApp(tk.Tk):
         self.star_apply_liquid_phase_label: ttk.Label | None = None
         self.star_apply_output_sim_widgets: list[tk.Widget] = []
         self.star_apply_status_var = tk.StringVar(value="等待输入")
+        self.update_status_var = tk.StringVar(value=f"当前版本: {__version__}")
+        self._update_check_running = False
         self.page_frames: dict[str, ttk.Frame] = {}
         self.current_page = "home"
 
@@ -93,6 +104,7 @@ class RefpropToCcmApp(tk.Tk):
         self._sync_liquid_table_state()
         self._sync_refrigerant_inlet_mode_state()
         self._wire_validation()
+        self.after(2000, self._check_for_updates_on_startup)
 
     def _build(self) -> None:
         self.container = ttk.Frame(self, padding=16)
@@ -132,6 +144,13 @@ class RefpropToCcmApp(tk.Tk):
         )
         ttk.Button(content, text="填入 STAR-CCM+ 入口条件", command=self._show_star_inlet_conditions_page).grid(
             row=5, column=0, sticky="ew", pady=6
+        )
+        ttk.Separator(content, orient="horizontal").grid(row=6, column=0, sticky="ew", pady=(18, 8))
+        ttk.Label(content, textvariable=self.update_status_var, foreground="#555").grid(
+            row=7, column=0, sticky="w", pady=(0, 6)
+        )
+        ttk.Button(content, text="检查更新", command=self._check_for_updates_manual).grid(
+            row=8, column=0, sticky="ew", pady=6
         )
         return frame
 
@@ -917,6 +936,109 @@ class RefpropToCcmApp(tk.Tk):
         directory = filedialog.askdirectory()
         if directory:
             self.star_apply_vars[key].set(directory)
+
+    def _check_for_updates_on_startup(self) -> None:
+        self._start_update_check(silent=True)
+
+    def _check_for_updates_manual(self) -> None:
+        self._start_update_check(silent=False)
+
+    def _start_update_check(self, *, silent: bool) -> None:
+        if self._update_check_running:
+            if not silent:
+                messagebox.showinfo("检查更新", "正在检查更新，请稍候。", parent=self)
+            return
+        self._update_check_running = True
+        if not silent:
+            self.update_status_var.set("正在检查更新...")
+        thread = threading.Thread(target=self._update_check_worker, args=(silent,), daemon=True)
+        thread.start()
+
+    def _update_check_worker(self, silent: bool) -> None:
+        try:
+            release = check_for_update(__version__)
+        except UpdateError as exc:
+            self.after(0, lambda exc=exc: self._finish_update_check_error(exc, silent))
+            return
+        self.after(0, lambda release=release: self._finish_update_check(release, silent))
+
+    def _finish_update_check_error(self, exc: UpdateError, silent: bool) -> None:
+        self._update_check_running = False
+        self.update_status_var.set(f"当前版本: {__version__}")
+        if not silent:
+            messagebox.showwarning("检查更新失败", str(exc), parent=self)
+
+    def _finish_update_check(self, release: ReleaseInfo | None, silent: bool) -> None:
+        self._update_check_running = False
+        if release is None:
+            self.update_status_var.set(f"当前已是最新版本: {__version__}")
+            if not silent:
+                messagebox.showinfo("检查更新", f"当前已是最新版本: {__version__}", parent=self)
+            return
+
+        self.update_status_var.set(f"发现新版本: {release.tag_name}")
+        should_download = messagebox.askyesno(
+            "发现新版本",
+            (
+                f"当前版本: {__version__}\n"
+                f"最新版本: {release.tag_name}\n"
+                f"发布页: {release.html_url or 'GitHub Release'}\n\n"
+                "是否下载并安装更新？"
+            ),
+            parent=self,
+        )
+        if should_download:
+            self._start_update_download(release)
+
+    def _start_update_download(self, release: ReleaseInfo) -> None:
+        self.update_status_var.set(f"正在下载更新: {release.tag_name}")
+        thread = threading.Thread(target=self._update_download_worker, args=(release,), daemon=True)
+        thread.start()
+
+    def _update_download_worker(self, release: ReleaseInfo) -> None:
+        try:
+            downloaded = download_release_asset(release)
+        except UpdateError as exc:
+            self.after(0, lambda exc=exc: self._finish_update_download_error(exc))
+            return
+        self.after(0, lambda downloaded=downloaded, release=release: self._finish_update_download(downloaded, release))
+
+    def _finish_update_download_error(self, exc: UpdateError) -> None:
+        self.update_status_var.set(f"当前版本: {__version__}")
+        messagebox.showerror("更新失败", str(exc), parent=self)
+
+    def _finish_update_download(self, downloaded: Path, release: ReleaseInfo) -> None:
+        current_exe = current_executable_path()
+        if current_exe is None:
+            self.update_status_var.set(f"更新已下载: {release.tag_name}")
+            messagebox.showinfo(
+                "更新已下载",
+                (
+                    "当前是源码方式运行，不能自动替换正在运行的 EXE。\n\n"
+                    f"更新文件已下载到:\n{downloaded}"
+                ),
+                parent=self,
+            )
+            return
+
+        should_install = messagebox.askyesno(
+            "更新已下载",
+            (
+                f"新版本 {release.tag_name} 已下载。\n\n"
+                "是否现在退出程序并自动替换为新版本？"
+            ),
+            parent=self,
+        )
+        if not should_install:
+            self.update_status_var.set(f"更新已下载: {downloaded}")
+            return
+        try:
+            install_update_and_restart(downloaded, current_exe)
+        except UpdateError as exc:
+            self.update_status_var.set(f"当前版本: {__version__}")
+            messagebox.showerror("安装更新失败", str(exc), parent=self)
+            return
+        self.destroy()
 
     def _wire_validation(self) -> None:
         for key in ("fluid_name", "saturation_value", "temp_start", "gas_quality_points", "liquid_temp_start", "liquid_temp_end", "liquid_temp_step"):
