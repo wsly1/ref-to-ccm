@@ -92,6 +92,7 @@ def install_update_and_restart(downloaded_exe: Path, current_exe: Path) -> None:
     if not current_exe.exists():
         raise UpdateError(f"当前程序不存在: {current_exe}")
 
+    current_pid = os.getpid()
     script_path = downloaded_exe.with_suffix(".bat")
     script_path.write_text(
         "\n".join(
@@ -100,13 +101,32 @@ def install_update_and_restart(downloaded_exe: Path, current_exe: Path) -> None:
                 "setlocal",
                 f'set "SRC={downloaded_exe}"',
                 f'set "DST={current_exe}"',
-                "timeout /t 2 /nobreak >nul",
-                ":retry",
+                f"set \"OLDPID={current_pid}\"",
+                'for %%A in ("%SRC%") do set "SRC_SIZE=%%~zA"',
+                ":wait_old_process",
+                'tasklist /FI "PID eq %OLDPID%" 2>nul | find "%OLDPID%" >nul',
+                "if not errorlevel 1 (",
+                "  timeout /t 1 /nobreak >nul",
+                "  goto wait_old_process",
+                ")",
+                "timeout /t 1 /nobreak >nul",
+                ":copy_retry",
                 'copy /Y "%SRC%" "%DST%" >nul',
                 "if errorlevel 1 (",
                 "  timeout /t 1 /nobreak >nul",
-                "  goto retry",
+                "  goto copy_retry",
                 ")",
+                'for %%A in ("%DST%") do set "DST_SIZE=%%~zA"',
+                'if not "%SRC_SIZE%"=="%DST_SIZE%" (',
+                "  timeout /t 1 /nobreak >nul",
+                "  goto copy_retry",
+                ")",
+                "timeout /t 1 /nobreak >nul",
+                "set PYINSTALLER_RESET_ENVIRONMENT=1",
+                "set _PYI_APPLICATION_HOME_DIR=",
+                "set _PYI_PARENT_PROCESS_LEVEL=",
+                "set _PYI_ARCHIVE_FILE=",
+                "set _MEIPASS2=",
                 'start "" "%DST%"',
                 'del "%SRC%" >nul 2>nul',
                 'del "%~f0" >nul 2>nul',
