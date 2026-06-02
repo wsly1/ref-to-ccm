@@ -908,6 +908,8 @@ class RefpropToCcmApp(tk.Tk):
         for r in result.reports:
             if r.value is not None:
                 val_str = f"{r.value:.4g}"
+            elif r.raw_value == "NaN":
+                val_str = "未求值"
             else:
                 val_str = r.raw_value
             self.report_log.insert(

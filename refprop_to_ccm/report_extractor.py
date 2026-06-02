@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import re
 import subprocess
 from dataclasses import dataclass, field
@@ -43,13 +44,7 @@ public class extract_report extends StarMacro {
           } catch (Throwable ex) {
             name = report.toString();
           }
-          String reportVal = "N/A";
-          try {
-            double val = (double) report.getClass().getMethod("getReportMonitorValue").invoke(report);
-            reportVal = String.valueOf(val);
-          } catch (Throwable ex) {
-            reportVal = "err:" + ex.getMessage();
-          }
+          String reportVal = readReportValue(report);
           String units = "N/A";
           try {
             Object u = report.getClass().getMethod("getUnits").invoke(report);
@@ -65,6 +60,15 @@ public class extract_report extends StarMacro {
       }
     } catch (Throwable ex) {
       sim.println("[report-extract] Report enumeration failed: " + ex.getMessage());
+    }
+  }
+
+  private String readReportValue(Object report) {
+    try {
+      double val = (double) report.getClass().getMethod("getValue").invoke(report);
+      return String.valueOf(val);
+    } catch (Throwable ex) {
+      return "err:" + ex.getMessage();
     }
   }
 
@@ -170,7 +174,9 @@ def parse_report_log(log_file: Path) -> ReportExtractResult:
             numeric_value: float | None = None
             if not raw_value.startswith("err:"):
                 try:
-                    numeric_value = float(raw_value)
+                    parsed = float(raw_value)
+                    if not math.isnan(parsed):
+                        numeric_value = parsed
                 except ValueError:
                     pass
             reports.append(ReportItem(

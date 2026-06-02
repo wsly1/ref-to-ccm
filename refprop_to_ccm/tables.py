@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 from datetime import datetime, timezone
 from pathlib import Path
 from xml.sax.saxutils import escape
@@ -139,10 +140,12 @@ def _report_sheet_xml(reports: list[dict[str, object]]) -> str:
         report_type = str(report.get("report_type", ""))
         value = report.get("value")
         units = str(report.get("units", ""))
-        if isinstance(value, (int, float)) and value is not None:
+        if isinstance(value, (int, float)) and value is not None and not (isinstance(value, float) and math.isnan(value)):
             value_cell = _number_cell(f"C{idx}", float(_sig4(float(value))), style=2)
         else:
             raw = str(report.get("raw_value", "N/A"))
+            if raw == "NaN":
+                raw = "未求值"
             value_cell = _inline_str_cell(f"C{idx}", raw, style=2)
         rows_xml[idx] = [
             _inline_str_cell(f"A{idx}", name, style=2),
