@@ -11,6 +11,20 @@ from .inlet_conditions import RefrigerantInletCondition
 from .models import CoolantCalculation, CoolantRow, LiquidProperties, LiquidRow, VaporRow
 
 
+REPORT_TABLE_HEADERS = (
+    "报告名称",
+    "类型",
+    "数值",
+    "单位",
+)
+REPORT_COLUMN_WIDTHS = (
+    (1, 1, 24.0),
+    (2, 2, 24.0),
+    (3, 3, 18.0),
+    (4, 4, 14.0),
+)
+
+
 PROPERTY_HEADERS = [
     "Temperature (C)",
     "Density (kg/m^3)",
@@ -90,6 +104,103 @@ def write_coolant_xlsx(
                 saturated_vapor_row=saturated_vapor_row,
             ),
         )
+
+
+def write_report_xlsx(
+    path: Path,
+    reports: list[dict[str, object]],
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with ZipFile(path, "w", compression=ZIP_DEFLATED) as workbook:
+        workbook.writestr("[Content_Types].xml", _content_types_xml())
+        workbook.writestr("_rels/.rels", _root_rels_xml())
+        workbook.writestr("docProps/app.xml", _app_xml())
+        workbook.writestr("docProps/core.xml", _core_xml())
+        workbook.writestr("xl/workbook.xml", _workbook_xml())
+        workbook.writestr("xl/_rels/workbook.xml.rels", _workbook_rels_xml())
+        workbook.writestr("xl/styles.xml", _report_styles_xml())
+        workbook.writestr("xl/worksheets/sheet1.xml", _report_sheet_xml(reports))
+
+
+def _sig4(value: float) -> str:
+    return f"{value:.4g}"
+
+
+def _report_sheet_xml(reports: list[dict[str, object]]) -> str:
+    rows_xml: dict[int, list[str]] = {}
+    rows_xml[1] = [
+        _inline_str_cell("A1", REPORT_TABLE_HEADERS[0], style=1),
+        _inline_str_cell("B1", REPORT_TABLE_HEADERS[1], style=1),
+        _inline_str_cell("C1", REPORT_TABLE_HEADERS[2], style=1),
+        _inline_str_cell("D1", REPORT_TABLE_HEADERS[3], style=1),
+    ]
+    for idx, report in enumerate(reports, start=2):
+        name = str(report.get("name", ""))
+        report_type = str(report.get("report_type", ""))
+        value = report.get("value")
+        units = str(report.get("units", ""))
+        if isinstance(value, (int, float)) and value is not None:
+            value_cell = _number_cell(f"C{idx}", float(_sig4(float(value))), style=2)
+        else:
+            raw = str(report.get("raw_value", "N/A"))
+            value_cell = _inline_str_cell(f"C{idx}", raw, style=2)
+        rows_xml[idx] = [
+            _inline_str_cell(f"A{idx}", name, style=2),
+            _inline_str_cell(f"B{idx}", report_type, style=2),
+            value_cell,
+            _inline_str_cell(f"D{idx}", units, style=2),
+        ]
+    last_row = len(reports) + 1
+    dimension_ref = f"A1:D{last_row}"
+    columns_xml = "".join(
+        f'<col min="{min_col}" max="{max_col}" width="{width}" customWidth="1"/>'
+        for min_col, max_col, width in REPORT_COLUMN_WIDTHS
+    )
+    sheet_rows = "".join(
+        f'<row r="{index}">{"".join(cells)}</row>' for index, cells in rows_xml.items()
+    )
+    return (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        f'<dimension ref="{dimension_ref}"/>'
+        '<sheetViews><sheetView workbookViewId="0"/></sheetViews>'
+        '<sheetFormatPr defaultColWidth="9" defaultRowHeight="13.5"/>'
+        '<cols>'
+        f"{columns_xml}"
+        '</cols>'
+        '<sheetData>'
+        f"{sheet_rows}"
+        "</sheetData>"
+        "</worksheet>"
+    )
+
+
+def _report_styles_xml() -> str:
+    return (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        '<fonts count="2">'
+        '<font><sz val="11"/><name val="宋体"/></font>'
+        '<font><b/><sz val="11"/><name val="宋体"/></font>'
+        '</fonts>'
+        '<fills count="3">'
+        '<fill><patternFill patternType="none"/></fill>'
+        '<fill><patternFill patternType="gray125"/></fill>'
+        '<fill><patternFill patternType="solid"><fgColor rgb="FFD9E2F3"/><bgColor indexed="64"/></patternFill></fill>'
+        '</fills>'
+        '<borders count="2">'
+        '<border><left/><right/><top/><bottom/><diagonal/></border>'
+        '<border><left style="thin"/><right style="thin"/><top style="thin"/><bottom style="thin"/><diagonal/></border>'
+        '</borders>'
+        '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
+        '<cellXfs count="3">'
+        '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>'
+        '<xf numFmtId="0" fontId="1" fillId="2" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>'
+        '<xf numFmtId="0" fontId="0" fillId="2" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="left" vertical="center"/></xf>'
+        '</cellXfs>'
+        '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>'
+        "</styleSheet>"
+    )
 
 
 def _write_property_csv(path: Path, rows: list[VaporRow] | list[LiquidRow]) -> None:

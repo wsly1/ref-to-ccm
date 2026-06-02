@@ -15,8 +15,9 @@ from .egasp_client import build_coolant_calculation, build_coolant_row
 from .inlet_conditions import RefrigerantInletCondition
 from .models import LiquidRow, VaporRow
 from .refprop_client import RefpropClient
+from .report_extractor import ReportExtractResult, run_report_extraction
 from .star_apply import StarApplyConfig, apply_star_from_outputs
-from .tables import write_coolant_xlsx
+from .tables import write_coolant_xlsx, write_report_xlsx
 from .units import k_to_c
 from .updater import (
     ReleaseInfo,
@@ -69,6 +70,10 @@ class RefpropToCcmApp(tk.Tk):
         self.star_apply_status_var = tk.StringVar(value="等待输入")
         self.update_status_var = tk.StringVar(value=f"当前版本: {__version__}")
         self._update_check_running = False
+        self.report_sim_file = tk.StringVar(value="")
+        self.report_starccm_exe = tk.StringVar(value=DEFAULT_STARCCM_EXE if Path(DEFAULT_STARCCM_EXE).exists() else "")
+        self.report_status_var = tk.StringVar(value="等待输入")
+        self.report_result: ReportExtractResult | None = None
         self.page_frames: dict[str, ttk.Frame] = {}
         self.current_page = "home"
 
@@ -117,6 +122,7 @@ class RefpropToCcmApp(tk.Tk):
         self.page_frames["coolant"] = self._build_coolant_page()
         self.page_frames["star_apply"] = self._build_star_apply_page()
         self.page_frames["star_inlet"] = self._build_star_inlet_conditions_page()
+        self.page_frames["report"] = self._build_report_page()
 
         for frame in self.page_frames.values():
             frame.grid(row=0, column=0, sticky="nsew")
@@ -145,12 +151,15 @@ class RefpropToCcmApp(tk.Tk):
         ttk.Button(content, text="填入 STAR-CCM+ 入口条件", command=self._show_star_inlet_conditions_page).grid(
             row=5, column=0, sticky="ew", pady=6
         )
-        ttk.Separator(content, orient="horizontal").grid(row=6, column=0, sticky="ew", pady=(18, 8))
+        ttk.Button(content, text="提取报告", command=self._show_report_page).grid(
+            row=6, column=0, sticky="ew", pady=6
+        )
+        ttk.Separator(content, orient="horizontal").grid(row=7, column=0, sticky="ew", pady=(18, 8))
         ttk.Label(content, textvariable=self.update_status_var, foreground="#555").grid(
-            row=7, column=0, sticky="w", pady=(0, 6)
+            row=8, column=0, sticky="w", pady=(0, 6)
         )
         ttk.Button(content, text="检查更新", command=self._check_for_updates_manual).grid(
-            row=8, column=0, sticky="ew", pady=6
+            row=9, column=0, sticky="ew", pady=6
         )
         return frame
 
@@ -763,6 +772,57 @@ class RefpropToCcmApp(tk.Tk):
         self._sync_star_apply_save_mode_state()
         return outer
 
+    def _build_report_page(self) -> ttk.Frame:
+        outer = ttk.Frame(self.container)
+        outer.columnconfigure(0, weight=1)
+        outer.rowconfigure(2, weight=1)
+
+        nav_frame = ttk.Frame(outer)
+        nav_frame.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        ttk.Button(nav_frame, text="返回主页", command=self._show_home_page).pack(side="left")
+
+        form_frame = ttk.LabelFrame(outer, text="提取 STAR-CCM+ 仿真报告", padding=12)
+        form_frame.grid(row=1, column=0, sticky="ew")
+        form_frame.columnconfigure(1, weight=1)
+
+        ttk.Label(form_frame, text="sim 文件").grid(row=0, column=0, sticky="w", pady=6)
+        ttk.Entry(form_frame, textvariable=self.report_sim_file).grid(row=0, column=1, sticky="ew", pady=6)
+        ttk.Button(form_frame, text="浏览", command=self._browse_report_sim_file).grid(row=0, column=2, padx=(8, 0))
+
+        ttk.Label(form_frame, text="STAR-CCM+ 程序").grid(row=1, column=0, sticky="w", pady=6)
+        ttk.Entry(form_frame, textvariable=self.report_starccm_exe).grid(row=1, column=1, sticky="ew", pady=6)
+        ttk.Button(form_frame, text="浏览", command=self._browse_report_starccm_exe).grid(row=1, column=2, padx=(8, 0))
+
+        ttk.Label(form_frame, text="输出目录").grid(row=2, column=0, sticky="w", pady=6)
+        ttk.Entry(form_frame, state="readonly").grid(row=2, column=1, sticky="ew", pady=6)
+        ttk.Label(form_frame, text="out（自动）", foreground="#666").grid(row=2, column=2, padx=(8, 0), sticky="w")
+
+        action_frame = ttk.Frame(form_frame)
+        action_frame.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(10, 4))
+        ttk.Button(action_frame, text="提取报告", command=self._start_report_extraction).pack(side="left")
+        ttk.Button(action_frame, text="打开输出目录", command=self._open_report_output_dir).pack(side="left", padx=8)
+
+        ttk.Label(form_frame, textvariable=self.report_status_var, foreground="#555").grid(
+            row=4, column=0, columnspan=3, sticky="w", pady=(4, 0)
+        )
+        ttk.Label(
+            form_frame,
+            text="会自动读取 sim 中所有已有的 Report，提取数值后写入 Excel。",
+            foreground="#666",
+        ).grid(row=5, column=0, columnspan=3, sticky="w", pady=(0, 4))
+
+        log_frame = ttk.LabelFrame(outer, text="提取结果", padding=8)
+        log_frame.grid(row=2, column=0, sticky="nsew", pady=(8, 0))
+        log_frame.columnconfigure(0, weight=1)
+        log_frame.rowconfigure(0, weight=1)
+        self.report_log = tk.Text(log_frame, wrap="word", height=16)
+        self.report_log.grid(row=0, column=0, sticky="nsew")
+        scrollbar = ttk.Scrollbar(log_frame, orient="vertical", command=self.report_log.yview)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        self.report_log.configure(yscrollcommand=scrollbar.set)
+
+        return outer
+
     def _show_page(self, page_name: str) -> None:
         self.page_frames[page_name].tkraise()
         self.current_page = page_name
@@ -786,6 +846,106 @@ class RefpropToCcmApp(tk.Tk):
         self.star_apply_source_type.set("inlet_conditions")
         self._sync_star_apply_source_state()
         self._show_page("star_inlet")
+
+    def _show_report_page(self) -> None:
+        self._show_page("report")
+
+    def _browse_report_sim_file(self) -> None:
+        filename = filedialog.askopenfilename(filetypes=[("STAR-CCM+ sim", "*.sim"), ("All files", "*.*")])
+        if filename:
+            self.report_sim_file.set(filename)
+
+    def _browse_report_starccm_exe(self) -> None:
+        filename = filedialog.askopenfilename(filetypes=[("Executable", "*.exe"), ("All files", "*.*")])
+        if filename:
+            self.report_starccm_exe.set(filename)
+
+    def _open_report_output_dir(self) -> None:
+        directory = Path.cwd() / "out"
+        directory.mkdir(parents=True, exist_ok=True)
+        os.startfile(directory)
+
+    def _start_report_extraction(self) -> None:
+        sim_text = self.report_sim_file.get().strip()
+        if not sim_text:
+            messagebox.showerror("输入错误", "请选择 sim 文件。", parent=self)
+            return
+        sim_file = Path(sim_text)
+        starccm_text = self.report_starccm_exe.get().strip()
+        if not starccm_text:
+            messagebox.showerror("输入错误", "请选择 STAR-CCM+ 程序。", parent=self)
+            return
+        starccm_exe = Path(starccm_text)
+        output_dir = Path.cwd() / "out" / "report_extract"
+        self.report_status_var.set("正在运行 STAR-CCM+ 提取报告...")
+        self.report_log.delete("1.0", "end")
+        thread = threading.Thread(
+            target=self._run_report_extraction_worker,
+            args=(starccm_exe, sim_file, output_dir),
+            daemon=True,
+        )
+        thread.start()
+
+    def _run_report_extraction_worker(
+        self, starccm_exe: Path, sim_file: Path, output_dir: Path
+    ) -> None:
+        try:
+            result = run_report_extraction(starccm_exe, sim_file, output_dir)
+        except Exception as exc:
+            self.after(0, self._finish_report_extraction_error, exc)
+            return
+        self.after(0, self._finish_report_extraction_success, result, sim_file)
+
+    def _finish_report_extraction_success(
+        self, result: ReportExtractResult, sim_file: Path
+    ) -> None:
+        self.report_result = result
+        self.report_log.delete("1.0", "end")
+
+        self.report_log.insert("end", f"共找到 {len(result.reports)} 个报告\n\n")
+        self.report_log.insert("end", f"{'报告名称':20s} {'类型':24s} {'数值':>16s} {'单位'}\n")
+        self.report_log.insert("end", "-" * 80 + "\n")
+        for r in result.reports:
+            if r.value is not None:
+                val_str = f"{r.value:.4g}"
+            else:
+                val_str = r.raw_value
+            self.report_log.insert(
+                "end", f"{r.name:20s} {r.report_type:24s} {val_str:>16s} {r.units}\n"
+            )
+
+        if result.regions:
+            self.report_log.insert("end", "\n--- 区域与边界 ---\n")
+            for region_name, boundaries in result.regions.items():
+                self.report_log.insert("end", f"  {region_name}: {', '.join(boundaries)}\n")
+
+        report_dicts = [
+            {
+                "name": r.name,
+                "report_type": r.report_type,
+                "value": r.value,
+                "raw_value": r.raw_value,
+                "units": r.units,
+            }
+            for r in result.reports
+        ]
+        sim_stem = sim_file.stem
+        output_path = Path.cwd() / "out" / f"{sim_stem}报告.xlsx"
+        try:
+            write_report_xlsx(output_path, report_dicts)
+            self.report_log.insert("end", f"\nExcel 已保存: {output_path.resolve()}\n")
+            self.report_status_var.set(f"完成，已保存: {output_path.name}")
+        except Exception as exc:
+            self.report_log.insert("end", f"\nExcel 写入失败: {exc}\n")
+            self.report_status_var.set("完成，但 Excel 写入失败")
+
+        messagebox.showinfo("完成", f"报告提取完成，共 {len(result.reports)} 个报告。\n\nExcel: {output_path.resolve()}", parent=self)
+
+    def _finish_report_extraction_error(self, exc: Exception) -> None:
+        self.report_status_var.set("失败")
+        self.report_log.insert("end", f"提取失败: {exc}\n")
+        self.report_log.see("end")
+        messagebox.showerror("提取失败", str(exc), parent=self)
 
     def _init_coolant_vars(self) -> None:
         if self.coolant_vars:
