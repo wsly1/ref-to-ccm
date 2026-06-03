@@ -97,9 +97,11 @@ class RefpropToCcmApp(tk.Tk):
             starccm_default = DEFAULT_STARCCM_EXE
         else:
             starccm_default = ""
-        self.report_sim_file = tk.StringVar(value="")
+        saved_sim = self._config.get("report_sim_file", "")
+        self.report_sim_file = tk.StringVar(value=saved_sim)
         self.report_starccm_exe = tk.StringVar(value=starccm_default)
-        self.report_starccm_exe.trace_add("write", self._on_starccm_exe_changed)
+        self.report_sim_file.trace_add("write", lambda *_: self._save_report_config())
+        self.report_starccm_exe.trace_add("write", lambda *_: self._save_report_config())
         self.report_status_var = tk.StringVar(value="等待输入")
         self.report_result: ReportExtractResult | None = None
         self.page_frames: dict[str, ttk.Frame] = {}
@@ -879,11 +881,10 @@ class RefpropToCcmApp(tk.Tk):
     def _show_report_page(self) -> None:
         self._show_page("report")
 
-    def _on_starccm_exe_changed(self, *args: object) -> None:
-        val = self.report_starccm_exe.get().strip()
-        if val:
-            self._config["starccm_exe"] = val
-            _save_config(self._config)
+    def _save_report_config(self) -> None:
+        self._config["starccm_exe"] = self.report_starccm_exe.get().strip()
+        self._config["report_sim_file"] = self.report_sim_file.get().strip()
+        _save_config(self._config)
 
     def _browse_report_sim_file(self) -> None:
         filename = filedialog.askopenfilename(filetypes=[("STAR-CCM+ sim", "*.sim"), ("All files", "*.*")])
