@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import json
+import sys
 import threading
 import tkinter as tk
 from pathlib import Path
@@ -38,7 +39,7 @@ DEFAULT_STARCCM_EXE = (
 )
 SATURATION_TABLE_OFFSET_C = 0.001
 
-CONFIG_FILE = Path.home() / ".refprop_to_ccm_config.json"
+CONFIG_FILE = Path(sys.executable if getattr(sys, 'frozen', False) else __file__).parent / ".refprop_to_ccm_config.json"
 
 
 def _load_config() -> dict:
