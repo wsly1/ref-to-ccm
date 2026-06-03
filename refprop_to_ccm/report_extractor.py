@@ -135,7 +135,12 @@ def run_report_extraction(
 
     tmp_dir = Path(tempfile.mkdtemp(prefix="starccm_report_"))
     tmp_sim = tmp_dir / sim_file.name
-    shutil.copy2(sim_file, tmp_sim)
+    with open(sim_file, "rb") as src, open(tmp_sim, "wb") as dst:
+        while True:
+            chunk = src.read(1024 * 1024)
+            if not chunk:
+                break
+            dst.write(chunk)
 
     command = [str(starccm_exe), "-batch", str(macro_file.resolve()), str(tmp_sim.resolve())]
 
