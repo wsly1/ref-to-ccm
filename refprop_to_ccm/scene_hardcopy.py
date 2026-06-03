@@ -20,8 +20,8 @@ import star.base.neo.*;
 public class scene_hardcopy extends StarMacro {
 
   private Simulation sim;
-  private static final double[] VIEW_DIR = new double[]{0.0, 0.0, 1.0};
-  private static final double[] UP_VEC = new double[]{0.0, 1.0, 0.0};
+  private static final double[] VIEW_DIR = new double[]{{0.0, 0.0, 1.0}};
+  private static final double[] UP_VEC = new double[]{{0.0, 1.0, 0.0}};
   private static final double ZOOM_FORWARD = {zoom_forward};
   private static final int NUM_LABELS = {num_labels};
   private static final int EXPORT_W = {export_w};
