@@ -54,8 +54,8 @@ def _load_config() -> dict:
 def _save_config(data: dict) -> None:
     try:
         CONFIG_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    except Exception:
-        pass
+    except Exception as exc:
+        print(f"[config] 保存配置失败: {exc}")
 
 
 class RefpropToCcmApp(tk.Tk):
@@ -92,7 +92,7 @@ class RefpropToCcmApp(tk.Tk):
         self._update_check_running = False
         self._config = _load_config()
         saved_starccm = self._config.get("starccm_exe", "")
-        if saved_starccm and Path(saved_starccm).exists():
+        if saved_starccm:
             starccm_default = saved_starccm
         elif Path(DEFAULT_STARCCM_EXE).exists():
             starccm_default = DEFAULT_STARCCM_EXE
