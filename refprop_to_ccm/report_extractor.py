@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import math
 import re
+import shutil
 import subprocess
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -130,7 +132,12 @@ def run_report_extraction(
     macro_file.write_text(render_report_macro(), encoding="utf-8")
 
     log_file = output_directory / "starccm_report_extract.log"
-    command = [str(starccm_exe), "-batch", str(macro_file.resolve()), str(sim_file.resolve())]
+
+    tmp_dir = Path(tempfile.mkdtemp(prefix="starccm_report_"))
+    tmp_sim = tmp_dir / sim_file.name
+    shutil.copy2(sim_file, tmp_sim)
+
+    command = [str(starccm_exe), "-batch", str(macro_file.resolve()), str(tmp_sim.resolve())]
 
     with log_file.open("w", encoding="utf-8", errors="replace") as handle:
         handle.write("Command:\n")
@@ -150,6 +157,8 @@ def run_report_extraction(
                 f"STAR-CCM+ 运行超时（超过 {STARCCM_RUN_TIMEOUT_SECONDS} 秒）。"
                 f"日志: {log_file.resolve()}"
             ) from exc
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
 
     if completed.returncode != 0:
         raise RuntimeError(
