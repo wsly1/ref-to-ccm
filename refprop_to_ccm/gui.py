@@ -38,6 +38,24 @@ DEFAULT_STARCCM_EXE = (
 )
 SATURATION_TABLE_OFFSET_C = 0.001
 
+CONFIG_FILE = Path.home() / ".refprop_to_ccm_config.json"
+
+
+def _load_config() -> dict:
+    try:
+        if CONFIG_FILE.exists():
+            return json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return {}
+
+
+def _save_config(data: dict) -> None:
+    try:
+        CONFIG_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
 
 class RefpropToCcmApp(tk.Tk):
     def __init__(self) -> None:
@@ -71,8 +89,17 @@ class RefpropToCcmApp(tk.Tk):
         self.star_apply_status_var = tk.StringVar(value="等待输入")
         self.update_status_var = tk.StringVar(value=f"当前版本: {__version__}")
         self._update_check_running = False
+        self._config = _load_config()
+        saved_starccm = self._config.get("starccm_exe", "")
+        if saved_starccm and Path(saved_starccm).exists():
+            starccm_default = saved_starccm
+        elif Path(DEFAULT_STARCCM_EXE).exists():
+            starccm_default = DEFAULT_STARCCM_EXE
+        else:
+            starccm_default = ""
         self.report_sim_file = tk.StringVar(value="")
-        self.report_starccm_exe = tk.StringVar(value=DEFAULT_STARCCM_EXE if Path(DEFAULT_STARCCM_EXE).exists() else "")
+        self.report_starccm_exe = tk.StringVar(value=starccm_default)
+        self.report_starccm_exe.trace_add("write", self._on_starccm_exe_changed)
         self.report_status_var = tk.StringVar(value="等待输入")
         self.report_result: ReportExtractResult | None = None
         self.page_frames: dict[str, ttk.Frame] = {}
@@ -851,6 +878,12 @@ class RefpropToCcmApp(tk.Tk):
 
     def _show_report_page(self) -> None:
         self._show_page("report")
+
+    def _on_starccm_exe_changed(self, *args: object) -> None:
+        val = self.report_starccm_exe.get().strip()
+        if val:
+            self._config["starccm_exe"] = val
+            _save_config(self._config)
 
     def _browse_report_sim_file(self) -> None:
         filename = filedialog.askopenfilename(filetypes=[("STAR-CCM+ sim", "*.sim"), ("All files", "*.*")])
