@@ -103,6 +103,7 @@ class RefpropToCcmApp(tk.Tk):
         self.report_sim_file.trace_add("write", lambda *_: self._save_report_config())
         self.report_starccm_exe.trace_add("write", lambda *_: self._save_report_config())
         self.report_status_var = tk.StringVar(value="等待输入")
+        self.report_copy_file = tk.BooleanVar(value=True)
         self.report_result: ReportExtractResult | None = None
         self.page_frames: dict[str, ttk.Frame] = {}
         self.current_page = "home"
@@ -827,20 +828,23 @@ class RefpropToCcmApp(tk.Tk):
         ttk.Entry(form_frame, state="readonly").grid(row=2, column=1, sticky="ew", pady=6)
         ttk.Label(form_frame, text="out（自动）", foreground="#666").grid(row=2, column=2, padx=(8, 0), sticky="w")
 
+        ttk.Checkbutton(form_frame, text="复制 sim 文件后再运行（避免锁定原文件，大文件会很慢）",
+                        variable=self.report_copy_file).grid(row=3, column=0, columnspan=3, sticky="w", pady=4)
+
         action_frame = ttk.Frame(form_frame)
-        action_frame.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(10, 4))
+        action_frame.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(10, 4))
         ttk.Button(action_frame, text="提取报告", command=self._start_report_extraction).pack(side="left")
         ttk.Button(action_frame, text="导出场景图片", command=self._start_scene_from_report).pack(side="left", padx=8)
         ttk.Button(action_frame, text="打开输出目录", command=self._open_report_output_dir).pack(side="left", padx=8)
 
         ttk.Label(form_frame, textvariable=self.report_status_var, foreground="#555").grid(
-            row=4, column=0, columnspan=3, sticky="w", pady=(4, 0)
+            row=5, column=0, columnspan=3, sticky="w", pady=(4, 0)
         )
         ttk.Label(
             form_frame,
             text="提取报告：读取 sim 中所有 Report 数值并写入 Excel。导出场景：自动截图所有非几何/非网格场景。",
             foreground="#666",
-        ).grid(row=5, column=0, columnspan=3, sticky="w", pady=(0, 4))
+        ).grid(row=6, column=0, columnspan=3, sticky="w", pady=(0, 4))
 
         log_frame = ttk.LabelFrame(outer, text="提取结果", padding=8)
         log_frame.grid(row=2, column=0, sticky="nsew", pady=(8, 0))
@@ -913,20 +917,21 @@ class RefpropToCcmApp(tk.Tk):
             return
         starccm_exe = Path(starccm_text)
         output_dir = Path.cwd() / "out" / "report_extract"
+        copy_file = self.report_copy_file.get()
         self.report_status_var.set("正在运行 STAR-CCM+ 提取报告...")
         self.report_log.delete("1.0", "end")
         thread = threading.Thread(
             target=self._run_report_extraction_worker,
-            args=(starccm_exe, sim_file, output_dir),
+            args=(starccm_exe, sim_file, output_dir, copy_file),
             daemon=True,
         )
         thread.start()
 
     def _run_report_extraction_worker(
-        self, starccm_exe: Path, sim_file: Path, output_dir: Path
+        self, starccm_exe: Path, sim_file: Path, output_dir: Path, copy_file: bool
     ) -> None:
         try:
-            result = run_report_extraction(starccm_exe, sim_file, output_dir)
+            result = run_report_extraction(starccm_exe, sim_file, output_dir, copy_file=copy_file)
         except Exception as exc:
             self.after(0, self._finish_report_extraction_error, exc)
             return
@@ -997,20 +1002,21 @@ class RefpropToCcmApp(tk.Tk):
         sim_file = Path(sim_text)
         starccm_exe = Path(starccm_text)
         output_dir = Path.cwd() / "out"
+        copy_file = self.report_copy_file.get()
         self.report_status_var.set("正在运行 STAR-CCM+ 导出场景...")
         self.report_log.delete("1.0", "end")
         thread = threading.Thread(
             target=self._run_scene_hardcopy_worker,
-            args=(starccm_exe, sim_file, output_dir),
+            args=(starccm_exe, sim_file, output_dir, copy_file),
             daemon=True,
         )
         thread.start()
 
     def _run_scene_hardcopy_worker(
-        self, starccm_exe: Path, sim_file: Path, output_dir: Path
+        self, starccm_exe: Path, sim_file: Path, output_dir: Path, copy_file: bool
     ) -> None:
         try:
-            exported = run_scene_hardcopy(starccm_exe, sim_file, output_dir)
+            exported = run_scene_hardcopy(starccm_exe, sim_file, output_dir, copy_file=copy_file)
         except Exception as exc:
             self.after(0, self._finish_scene_hardcopy_error, exc)
             return

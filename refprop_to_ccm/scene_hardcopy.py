@@ -226,6 +226,7 @@ def run_scene_hardcopy(
     starccm_exe: Path,
     sim_file: Path,
     output_directory: Path,
+    copy_file: bool = True,
     zoom_forward: float = 0.0,
     num_labels: int = 5,
     export_w: int = 1920,
@@ -255,14 +256,18 @@ def run_scene_hardcopy(
 
     log_file = output_directory / "starccm_hardcopy.log"
 
-    tmp_dir = Path(tempfile.mkdtemp(prefix="starccm_hardcopy_"))
-    tmp_sim = tmp_dir / sim_file.name
-    with open(sim_file, "rb") as src, open(tmp_sim, "wb") as dst:
-        while True:
-            chunk = src.read(1024 * 1024)
-            if not chunk:
-                break
-            dst.write(chunk)
+    tmp_dir = None
+    if copy_file:
+        tmp_dir = Path(tempfile.mkdtemp(prefix="starccm_hardcopy_"))
+        tmp_sim = tmp_dir / sim_file.name
+        with open(sim_file, "rb") as src, open(tmp_sim, "wb") as dst:
+            while True:
+                chunk = src.read(1024 * 1024)
+                if not chunk:
+                    break
+                dst.write(chunk)
+    else:
+        tmp_sim = sim_file
 
     command = [str(starccm_exe), "-batch", str(macro_file.resolve()), str(tmp_sim.resolve())]
 
@@ -285,7 +290,8 @@ def run_scene_hardcopy(
                 f"日志: {log_file.resolve()}"
             ) from exc
         finally:
-            shutil.rmtree(tmp_dir, ignore_errors=True)
+            if tmp_dir is not None:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
 
     if completed.returncode != 0:
         raise RuntimeError(
