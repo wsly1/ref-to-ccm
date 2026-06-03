@@ -20,18 +20,18 @@ import star.base.neo.*;
 public class scene_hardcopy extends StarMacro {
 
   private Simulation sim;
-  private static final double[] VIEW_DIR = new double[]{{0.0, 0.0, 1.0}};
-  private static final double[] UP_VEC = new double[]{{0.0, 1.0, 0.0}};
-  private static final double ZOOM_FORWARD = {zoom_forward};
-  private static final int NUM_LABELS = {num_labels};
-  private static final int EXPORT_W = {export_w};
-  private static final int EXPORT_H = {export_h};
+  private static final double[] VIEW_DIR = new double[]{0.0, 0.0, 1.0};
+  private static final double[] UP_VEC = new double[]{0.0, 1.0, 0.0};
+  private static final double ZOOM_FORWARD = __ZOOM_FORWARD__;
+  private static final int NUM_LABELS = __NUM_LABELS__;
+  private static final int EXPORT_W = __EXPORT_W__;
+  private static final int EXPORT_H = __EXPORT_H__;
 
-  public void execute() {{
+  public void execute() {
     sim = getActiveSimulation();
     sim.println("[hardcopy] ===== Hardcopy Start =====");
 
-    try {{
+    try {
       Object sm = sim.getClass().getMethod("getSceneManager").invoke(sim);
       Object result = sm.getClass().getMethod("getObjects").invoke(sm);
       if (!(result instanceof Collection)) return;
@@ -39,16 +39,16 @@ public class scene_hardcopy extends StarMacro {
       sim.println("[hardcopy] Total scenes: " + scenes.size());
 
       int exportIndex = 0;
-      for (Object scene : scenes) {{
+      for (Object scene : scenes) {
         String name = "unknown";
-        try {{
+        try {
           name = (String) scene.getClass().getMethod("getPresentationName").invoke(scene);
-        }} catch (Throwable ex) {{}}
+        } catch (Throwable ex) {}
 
-        if (shouldSkip(name)) {{
+        if (shouldSkip(name)) {
           sim.println("[hardcopy] SKIP: " + name);
           continue;
-        }}
+        }
 
         sim.println("[hardcopy] --- Scene: \\"" + name + "\\" ---");
 
@@ -58,84 +58,84 @@ public class scene_hardcopy extends StarMacro {
         configureLegend(scene, name, NUM_LABELS);
         doHardcopy(scene, name, exportIndex);
         exportIndex++;
-      }}
-    }} catch (Throwable ex) {{
+      }
+    } catch (Throwable ex) {
       sim.println("[hardcopy] ERROR: " + ex.getMessage());
-    }}
+    }
 
     sim.println("[hardcopy] ===== Hardcopy End =====");
-  }}
+  }
 
-  private boolean shouldSkip(String name) {{
+  private boolean shouldSkip(String name) {
     String lower = name.toLowerCase();
     return lower.contains("几何") || lower.contains("geometry")
         || lower.contains("网格") || lower.contains("mesh");
-  }}
+  }
 
-  private void setViewOrientation(Object scene, String name) {{
-    try {{
+  private void setViewOrientation(Object scene, String name) {
+    try {
       Method m = findMethod(scene.getClass(), "setViewOrientation");
-      if (m != null && m.getParameterCount() == 2) {{
+      if (m != null && m.getParameterCount() == 2) {
         m.invoke(scene, new DoubleVector(VIEW_DIR), new DoubleVector(UP_VEC));
         sim.println("[hardcopy]     setViewOrientation OK");
-      }}
-    }} catch (Throwable ex) {{
+      }
+    } catch (Throwable ex) {
       sim.println("[hardcopy]     setViewOrientation failed: " + ex.getMessage());
-    }}
-  }}
+    }
+  }
 
-  private void fitAll(Object scene, String name) {{
-    try {{
+  private void fitAll(Object scene, String name) {
+    try {
       Method m = findMethod(scene.getClass(), "updatePipelineAndResetClippingRange");
       if (m != null && m.getParameterCount() == 0) m.invoke(scene);
-    }} catch (Throwable ex) {{}}
+    } catch (Throwable ex) {}
 
-    try {{
+    try {
       Method m = findMethod(scene.getClass(), "centerViewOn");
-      if (m != null) {{
+      if (m != null) {
         Class<?>[] params = m.getParameterTypes();
-        if (params.length == 2 && params[0] == double[].class && params[1] == int.class) {{
-          m.invoke(scene, new double[]{{0.0, 0.0, 0.0}}, 1);
+        if (params.length == 2 && params[0] == double[].class && params[1] == int.class) {
+          m.invoke(scene, new double[]{0.0, 0.0, 0.0}, 1);
           sim.println("[hardcopy]     centerViewOn(origin,1) OK");
-        }} else if (params.length == 1 && params[0] == double[].class) {{
-          m.invoke(scene, new double[]{{0.0, 0.0, 0.0}});
+        } else if (params.length == 1 && params[0] == double[].class) {
+          m.invoke(scene, new double[]{0.0, 0.0, 0.0});
           sim.println("[hardcopy]     centerViewOn(origin) OK");
-        }}
-      }}
-    }} catch (Throwable ex) {{
+        }
+      }
+    } catch (Throwable ex) {
       sim.println("[hardcopy]     centerViewOn failed: " + ex.getMessage());
-    }}
-  }}
+    }
+  }
 
-  private void zoomForward(Object scene, String name, double distance) {{
-    if (Math.abs(distance) < 1e-12) {{
+  private void zoomForward(Object scene, String name, double distance) {
+    if (Math.abs(distance) < 1e-12) {
       return;
-    }}
-    try {{
+    }
+    try {
       Method m = findMethod(scene.getClass(), "translateCamera");
-      if (m != null) {{
+      if (m != null) {
         Class<?>[] params = m.getParameterTypes();
-        if (params.length == 1 && params[0] == DoubleVector.class) {{
-          m.invoke(scene, new DoubleVector(new double[]{{
-            VIEW_DIR[0] * distance, VIEW_DIR[1] * distance, VIEW_DIR[2] * distance}}));
+        if (params.length == 1 && params[0] == DoubleVector.class) {
+          m.invoke(scene, new DoubleVector(new double[]{
+            VIEW_DIR[0] * distance, VIEW_DIR[1] * distance, VIEW_DIR[2] * distance}));
           sim.println("[hardcopy]     translateCamera OK");
-        }} else if (params.length == 1 && params[0] == double[].class) {{
-          m.invoke(scene, (Object) new double[]{{
-            VIEW_DIR[0] * distance, VIEW_DIR[1] * distance, VIEW_DIR[2] * distance}});
+        } else if (params.length == 1 && params[0] == double[].class) {
+          m.invoke(scene, (Object) new double[]{
+            VIEW_DIR[0] * distance, VIEW_DIR[1] * distance, VIEW_DIR[2] * distance});
           sim.println("[hardcopy]     translateCamera OK");
-        }}
-      }}
-    }} catch (Throwable ex) {{
+        }
+      }
+    } catch (Throwable ex) {
       sim.println("[hardcopy]     translateCamera failed: " + ex.getMessage());
-    }}
-  }}
+    }
+  }
 
-  private void configureLegend(Object scene, String name, int numLabels) {{
-    try {{
+  private void configureLegend(Object scene, String name, int numLabels) {
+    try {
       Object children = scene.getClass().getMethod("getChildren").invoke(scene);
       if (!(children instanceof Collection)) return;
-      for (Object child : (Collection<?>) children) {{
-        try {{
+      for (Object child : (Collection<?>) children) {
+        try {
           Method getLegend = findMethod(child.getClass(), "getLegend");
           if (getLegend == null) continue;
           Object legend = getLegend.invoke(child);
@@ -146,62 +146,62 @@ public class scene_hardcopy extends StarMacro {
           trySet(legend, "setNumTicks", numLabels);
           sim.println("[hardcopy]     legend numLabels=" + numLabels + " OK");
           return;
-        }} catch (Throwable ex) {{}}
-      }}
-    }} catch (Throwable ex) {{}}
-  }}
+        } catch (Throwable ex) {}
+      }
+    } catch (Throwable ex) {}
+  }
 
-  private void trySet(Object obj, String methodName, Object value) {{
-    try {{
+  private void trySet(Object obj, String methodName, Object value) {
+    try {
       Method m = findMethod(obj.getClass(), methodName);
       if (m == null) return;
       Class<?>[] params = m.getParameterTypes();
       if (params.length != 1) return;
-      if (value instanceof DoubleVector && params[0] == DoubleVector.class) {{
+      if (value instanceof DoubleVector && params[0] == DoubleVector.class) {
         m.invoke(obj, value);
-      }} else if (value instanceof String && params[0] == String.class) {{
+      } else if (value instanceof String && params[0] == String.class) {
         m.invoke(obj, value);
-      }} else if (value instanceof Integer && params[0] == int.class) {{
+      } else if (value instanceof Integer && params[0] == int.class) {
         m.invoke(obj, ((Integer) value).intValue());
-      }} else if (value instanceof Double && (params[0] == double.class || params[0] == Double.class)) {{
+      } else if (value instanceof Double && (params[0] == double.class || params[0] == Double.class)) {
         m.invoke(obj, ((Double) value).doubleValue());
-      }}
-    }} catch (Throwable ex) {{}}
-  }}
+      }
+    } catch (Throwable ex) {}
+  }
 
-  private void doHardcopy(Object scene, String name, int index) {{
+  private void doHardcopy(Object scene, String name, int index) {
     String safeName = name.replaceAll("[\\\\/:*?\\"<>|]", "_");
-    String filePath = "{output_dir}/scene_" + index + "_" + safeName + ".png";
+    String filePath = "__OUTPUT_DIR__/scene_" + index + "_" + safeName + ".png";
     sim.println("[hardcopy]     Exporting: " + filePath);
 
-    try {{
+    try {
       File file = new File(filePath);
       file.getParentFile().mkdirs();
-      try {{
+      try {
         scene.getClass().getMethod("printToFile", File.class, int.class, int.class)
           .invoke(scene, file, EXPORT_W, EXPORT_H);
         sim.println("[hardcopy]     OK");
         return;
-      }} catch (Throwable ex) {{}}
-      try {{
+      } catch (Throwable ex) {}
+      try {
         scene.getClass().getMethod("printAndWait", File.class, int.class, int.class, int.class)
           .invoke(scene, file, EXPORT_W, EXPORT_H, 0);
         sim.println("[hardcopy]     OK via printAndWait");
-      }} catch (Throwable ex) {{
+      } catch (Throwable ex) {
         sim.println("[hardcopy]     FAILED: " + ex.getMessage());
-      }}
-    }} catch (Throwable ex) {{
+      }
+    } catch (Throwable ex) {
       sim.println("[hardcopy]     FAILED: " + ex.getMessage());
-    }}
-  }}
+    }
+  }
 
-  private Method findMethod(Class<?> cls, String name) {{
-    for (Method m : cls.getMethods()) {{
+  private Method findMethod(Class<?> cls, String name) {
+    for (Method m : cls.getMethods()) {
       if (m.getName().equals(name)) return m;
-    }}
+    }
     return null;
-  }}
-}}
+  }
+}
 """
 
 
@@ -212,12 +212,13 @@ def render_scene_hardcopy_macro(
     export_w: int = 1920,
     export_h: int = 1080,
 ) -> str:
-    return MACRO_TEMPLATE.format(
-        output_dir=output_dir,
-        zoom_forward=zoom_forward,
-        num_labels=num_labels,
-        export_w=export_w,
-        export_h=export_h,
+    return (
+        MACRO_TEMPLATE
+        .replace("__OUTPUT_DIR__", output_dir)
+        .replace("__ZOOM_FORWARD__", str(zoom_forward))
+        .replace("__NUM_LABELS__", str(num_labels))
+        .replace("__EXPORT_W__", str(export_w))
+        .replace("__EXPORT_H__", str(export_h))
     )
 
 
