@@ -12,6 +12,22 @@ ALLOWED_REFPROP_WARNINGS = {-319, -320, -113}
 EPSILON = 1.0e-10
 TEMPERATURE_EPSILON = 1.0e-6
 MAX_ABS_SPECIFIC_ENTROPY_J_PER_KG_K = 1.0e7
+_REFPROP_UNIT_MASS_BASE_SI = "mass_base_si"
+_REFPROP_UNIT_MASS_SI = "mass_si"
+_LEGACY_REFPROP_MASS_SI = 2
+_MASS_SI_OUTPUT_SCALE = {
+    "E": 1000.0,
+    "H": 1000.0,
+    "S": 1000.0,
+    "CV": 1000.0,
+    "CP": 1000.0,
+    "CPLIQ": 1000.0,
+    "CPVAP": 1000.0,
+    "P": 1.0e6,
+    "TCX": 1.0e-3,
+    "VIS": 1.0e-6,
+}
+_MASS_SI_OUTPUT_UNCHANGED = {"T", "D", "DLIQ", "DVAP"}
 
 
 class RefpropClient:
@@ -29,6 +45,7 @@ class RefpropClient:
 
         self.rp = REFPROPFunctionLibrary(str(self.root))
         self.rp.SETPATHdll(str(self.root))
+        self._pq_unit_code, self._pq_unit_system = _resolve_refprop_pq_units(self.rp)
         self.loaded_fluid = ""
         self.z: list[float] = [1.0]
         self.last_equivalent_replacement_count = 0
@@ -364,26 +381,35 @@ class RefpropClient:
         return self._refprop_pq_outputs(pressure_pa, quality, output)[0]
 
     def _refprop_pq_outputs(self, pressure_pa: float, quality: float, outputs: str) -> tuple[float, ...]:
+        unit_code, unit_system = self._get_pq_units()
         result = self.rp.REFPROPdll(
             self.loaded_fluid,
             "PQ",
             outputs,
-            self.rp.MASS_BASE_SI,
+            unit_code,
             0,
             0,
-            pressure_pa,
+            _pq_pressure_input(pressure_pa, unit_system),
             quality,
             self.z,
         )
         self._check(result.ierr, result.herr, f"calculating PQ state ({outputs}) at P={pressure_pa} Pa, Q={quality}")
         output_names = [output_name.strip().upper() for output_name in outputs.split(";")]
-        values = tuple(float(result.Output[index]) for index in range(len(output_names)))
+        values = tuple(
+            _pq_output_value(output_name, float(result.Output[index]), unit_system)
+            for index, output_name in enumerate(output_names)
+        )
         if any(math.isnan(value) for value in values):
             raise RuntimeError(f"REFPROP returned NaN while calculating PQ state ({outputs})")
         for output_name, value in zip(output_names, values):
             if output_name == "S":
                 _validate_specific_entropy(value, f"PQ state at P={pressure_pa} Pa, Q={quality}")
         return values
+
+    def _get_pq_units(self) -> tuple[int, str]:
+        if not hasattr(self, "_pq_unit_code") or not hasattr(self, "_pq_unit_system"):
+            self._pq_unit_code, self._pq_unit_system = _resolve_refprop_pq_units(self.rp)
+        return self._pq_unit_code, self._pq_unit_system
 
     @staticmethod
     def _check(ierr: int, herr: str, action: str) -> None:
@@ -401,6 +427,56 @@ def _validate_specific_entropy(value: float, context: str) -> None:
             f"REFPROP returned abnormal entropy while calculating {context}: "
             f"{value} J/kg-K"
         )
+
+
+def _resolve_refprop_pq_units(rp: Any) -> tuple[int, str]:
+    mass_base_si = _refprop_enum_value(rp, "MASS_BASE_SI", "MASS BASE SI")
+    if mass_base_si is not None:
+        return mass_base_si, _REFPROP_UNIT_MASS_BASE_SI
+
+    mass_si = _refprop_enum_value(rp, "MASS_SI", "MASS SI")
+    if mass_si is not None:
+        return mass_si, _REFPROP_UNIT_MASS_SI
+
+    return _LEGACY_REFPROP_MASS_SI, _REFPROP_UNIT_MASS_SI
+
+
+def _refprop_enum_value(rp: Any, attr_name: str, enum_name: str) -> int | None:
+    attr_value = getattr(rp, attr_name, None)
+    if attr_value is not None:
+        return int(attr_value)
+
+    get_enum = getattr(rp, "GETENUMdll", None)
+    if not callable(get_enum):
+        return None
+    try:
+        enum_result = get_enum(0, enum_name)
+    except Exception:
+        return None
+    if int(getattr(enum_result, "ierr", 0)) != 0:
+        return None
+    return int(enum_result.iEnum)
+
+
+def _pq_pressure_input(pressure_pa: float, unit_system: str) -> float:
+    if unit_system == _REFPROP_UNIT_MASS_BASE_SI:
+        return pressure_pa
+    if unit_system == _REFPROP_UNIT_MASS_SI:
+        return pressure_pa / 1.0e6
+    raise RuntimeError(f"Unsupported REFPROP unit system: {unit_system}")
+
+
+def _pq_output_value(output_name: str, value: float, unit_system: str) -> float:
+    if unit_system == _REFPROP_UNIT_MASS_BASE_SI:
+        return value
+    if unit_system != _REFPROP_UNIT_MASS_SI:
+        raise RuntimeError(f"Unsupported REFPROP unit system: {unit_system}")
+
+    if output_name in _MASS_SI_OUTPUT_SCALE:
+        return value * _MASS_SI_OUTPUT_SCALE[output_name]
+    if output_name in _MASS_SI_OUTPUT_UNCHANGED:
+        return value
+    raise RuntimeError(f"Unsupported REFPROP MASS SI output conversion: {output_name}")
 
 
 def _as_fld_name(name: str) -> str:
