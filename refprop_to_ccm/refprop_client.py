@@ -15,6 +15,8 @@ MAX_ABS_SPECIFIC_ENTROPY_J_PER_KG_K = 1.0e7
 _REFPROP_UNIT_MASS_BASE_SI = "mass_base_si"
 _REFPROP_UNIT_MASS_SI = "mass_si"
 _LEGACY_REFPROP_MASS_SI = 2
+_REFPROP_PQ_MOLE_QUALITY = 1
+_MISSING_REFPROPDLL_FRAGMENT = "REFPROPdll could not be loaded"
 _MASS_SI_OUTPUT_SCALE = {
     "E": 1000.0,
     "H": 1000.0,
@@ -381,30 +383,115 @@ class RefpropClient:
         return self._refprop_pq_outputs(pressure_pa, quality, output)[0]
 
     def _refprop_pq_outputs(self, pressure_pa: float, quality: float, outputs: str) -> tuple[float, ...]:
+        if not _has_usable_refpropdll(self.rp):
+            return self._refprop_pq_outputs_legacy(pressure_pa, quality, outputs)
+
         unit_code, unit_system = self._get_pq_units()
-        result = self.rp.REFPROPdll(
-            self.loaded_fluid,
-            "PQ",
-            outputs,
-            unit_code,
-            0,
-            0,
-            _pq_pressure_input(pressure_pa, unit_system),
-            quality,
-            self.z,
-        )
+        try:
+            result = self.rp.REFPROPdll(
+                self.loaded_fluid,
+                "PQ",
+                outputs,
+                unit_code,
+                0,
+                0,
+                _pq_pressure_input(pressure_pa, unit_system),
+                quality,
+                self.z,
+            )
+        except ValueError as exc:
+            if _is_missing_refpropdll_error(exc):
+                return self._refprop_pq_outputs_legacy(pressure_pa, quality, outputs)
+            raise
         self._check(result.ierr, result.herr, f"calculating PQ state ({outputs}) at P={pressure_pa} Pa, Q={quality}")
         output_names = [output_name.strip().upper() for output_name in outputs.split(";")]
         values = tuple(
             _pq_output_value(output_name, float(result.Output[index]), unit_system)
             for index, output_name in enumerate(output_names)
         )
-        if any(math.isnan(value) for value in values):
-            raise RuntimeError(f"REFPROP returned NaN while calculating PQ state ({outputs})")
-        for output_name, value in zip(output_names, values):
-            if output_name == "S":
-                _validate_specific_entropy(value, f"PQ state at P={pressure_pa} Pa, Q={quality}")
-        return values
+        return _validate_pq_output_values(pressure_pa, quality, outputs, output_names, values)
+
+    def _refprop_pq_outputs_legacy(self, pressure_pa: float, quality: float, outputs: str) -> tuple[float, ...]:
+        state = self.rp.PQFLSHdll(pressure_pa / 1000.0, quality, self.z, _REFPROP_PQ_MOLE_QUALITY)
+        self._check(state.ierr, state.herr, f"calculating legacy PQ state ({outputs}) at P={pressure_pa} Pa, Q={quality}")
+
+        output_names = [output_name.strip().upper() for output_name in outputs.split(";")]
+        transport_cache: dict[str, Any] = {}
+        values = tuple(
+            self._legacy_pq_output_value(state, pressure_pa, quality, output_name, transport_cache)
+            for output_name in output_names
+        )
+        return _validate_pq_output_values(pressure_pa, quality, outputs, output_names, values)
+
+    def _legacy_pq_output_value(
+        self,
+        state: Any,
+        pressure_pa: float,
+        quality: float,
+        output_name: str,
+        transport_cache: dict[str, Any],
+    ) -> float:
+        bulk_molecular_weight = float(self.rp.WMOLdll(self.z))
+        liquid_composition = list(getattr(state, "x", self.z))
+        vapor_composition = list(getattr(state, "y", self.z))
+        liquid_molecular_weight = float(self.rp.WMOLdll(liquid_composition))
+        vapor_molecular_weight = float(self.rp.WMOLdll(vapor_composition))
+
+        if output_name == "T":
+            return float(state.T)
+        if output_name == "P":
+            return pressure_pa
+        if output_name == "D":
+            return float(state.D) * bulk_molecular_weight
+        if output_name == "DLIQ":
+            return float(state.Dl) * liquid_molecular_weight
+        if output_name == "DVAP":
+            return float(state.Dv) * vapor_molecular_weight
+        if output_name == "E":
+            return float(state.e) * 1000.0 / bulk_molecular_weight
+        if output_name == "H":
+            return float(state.h) * 1000.0 / bulk_molecular_weight
+        if output_name == "S":
+            return float(state.s) * 1000.0 / bulk_molecular_weight
+        if output_name == "CV":
+            return float(state.Cv) * 1000.0 / bulk_molecular_weight
+        if output_name == "CP":
+            return float(state.Cp) * 1000.0 / bulk_molecular_weight
+        if output_name == "CPLIQ":
+            liquid_thermo = self.rp.THERMdll(float(state.T), float(state.Dl), liquid_composition)
+            return float(liquid_thermo.Cp) * 1000.0 / liquid_molecular_weight
+        if output_name == "CPVAP":
+            vapor_thermo = self.rp.THERMdll(float(state.T), float(state.Dv), vapor_composition)
+            return float(vapor_thermo.Cp) * 1000.0 / vapor_molecular_weight
+        if output_name in {"TCX", "VIS"}:
+            transport = transport_cache.get("transport")
+            if transport is None:
+                transport = self._legacy_pq_transport(state, quality, liquid_composition, vapor_composition)
+                transport_cache["transport"] = transport
+            if output_name == "TCX":
+                return float(transport.tcx)
+            return float(transport.eta) * 1.0e-6
+        raise RuntimeError(f"Unsupported legacy REFPROP PQ output: {output_name}")
+
+    def _legacy_pq_transport(
+        self,
+        state: Any,
+        quality: float,
+        liquid_composition: list[float],
+        vapor_composition: list[float],
+    ) -> Any:
+        if quality <= EPSILON:
+            density = float(state.Dl)
+            composition = liquid_composition
+        elif quality >= 1.0 - EPSILON:
+            density = float(state.Dv)
+            composition = vapor_composition
+        else:
+            raise RuntimeError("REFPROP transport properties are only available at saturated liquid or vapor PQ states.")
+
+        transport = self.rp.TRNPRPdll(float(state.T), density, composition)
+        self._check(transport.ierr, transport.herr, "calculating legacy PQ transport properties")
+        return transport
 
     def _get_pq_units(self) -> tuple[int, str]:
         if not hasattr(self, "_pq_unit_code") or not hasattr(self, "_pq_unit_system"):
@@ -417,6 +504,31 @@ class RefpropClient:
             return
         if ierr != 0:
             raise RuntimeError(f"REFPROP error while {action}: {ierr} {herr}")
+
+
+def _validate_pq_output_values(
+    pressure_pa: float,
+    quality: float,
+    outputs: str,
+    output_names: list[str],
+    values: tuple[float, ...],
+) -> tuple[float, ...]:
+    if any(math.isnan(value) for value in values):
+        raise RuntimeError(f"REFPROP returned NaN while calculating PQ state ({outputs})")
+    for output_name, value in zip(output_names, values):
+        if output_name == "S":
+            _validate_specific_entropy(value, f"PQ state at P={pressure_pa} Pa, Q={quality}")
+    return values
+
+
+def _has_usable_refpropdll(rp: Any) -> bool:
+    if not callable(getattr(rp, "REFPROPdll", None)):
+        return False
+    return getattr(rp, "_REFPROPdll", True) is not None
+
+
+def _is_missing_refpropdll_error(exc: ValueError) -> bool:
+    return _MISSING_REFPROPDLL_FRAGMENT in str(exc)
 
 
 def _validate_specific_entropy(value: float, context: str) -> None:

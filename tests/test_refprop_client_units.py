@@ -72,6 +72,61 @@ class _GetEnumRefprop:
         raise AssertionError(f"unexpected enum lookup: {enum_name}")
 
 
+class _LegacyPqRefprop:
+    _REFPROPdll = None
+
+    def __init__(self) -> None:
+        self.pq_calls: list[dict[str, object]] = []
+        self.transport_calls: list[dict[str, object]] = []
+
+    def REFPROPdll(self, *args):
+        raise ValueError("The function REFPROPdll could not be loaded from the shared library.")
+
+    def PQFLSHdll(self, pressure_kpa, quality, z, kq):
+        self.pq_calls.append({"pressure_kpa": pressure_kpa, "quality": quality, "z": z, "kq": kq})
+        return SimpleNamespace(
+            ierr=0,
+            herr="",
+            T=300.0,
+            D=2.0,
+            Dl=10.0,
+            Dv=0.5,
+            x=[0.25, 0.75],
+            y=[0.6, 0.4],
+            e=90.0,
+            h=120.0,
+            s=1.5,
+            Cv=0.25,
+            Cp=0.3,
+        )
+
+    def THERMdll(self, temperature_k, density_mol_l, composition):
+        if density_mol_l == 10.0:
+            return SimpleNamespace(Cp=220.0)
+        if density_mol_l == 0.5:
+            return SimpleNamespace(Cp=110.0)
+        raise AssertionError(f"unexpected density: {density_mol_l}")
+
+    def TRNPRPdll(self, temperature_k, density_mol_l, composition):
+        self.transport_calls.append(
+            {
+                "temperature_k": temperature_k,
+                "density_mol_l": density_mol_l,
+                "composition": composition,
+            }
+        )
+        return SimpleNamespace(ierr=0, herr="", eta=15.0, tcx=0.08)
+
+    def WMOLdll(self, composition):
+        if composition == [1.0]:
+            return 100.0
+        if composition == [0.25, 0.75]:
+            return 80.0
+        if composition == [0.6, 0.4]:
+            return 40.0
+        raise AssertionError(f"unexpected composition: {composition}")
+
+
 def test_refprop_pq_outputs_uses_mass_base_si_when_available() -> None:
     rp = _MassBaseSiRefprop()
     client = _client_for(rp)
@@ -98,3 +153,28 @@ def test_refprop_pq_outputs_falls_back_to_mass_si_and_converts_units() -> None:
 
 def test_refprop_unit_resolution_can_use_getenum_when_instance_attr_is_missing() -> None:
     assert _resolve_refprop_pq_units(_GetEnumRefprop()) == (21, "mass_base_si")
+
+
+def test_refprop_pq_outputs_falls_back_to_legacy_pqflsh_when_refpropdll_is_missing() -> None:
+    rp = _LegacyPqRefprop()
+    client = _client_for(rp)
+
+    values = client._refprop_pq_outputs(800000.0, 0.0, "T;P;H;S;D;DLIQ;DVAP;CPLIQ;CPVAP;TCX;VIS")
+
+    assert values == pytest.approx(
+        (
+            300.0,
+            800000.0,
+            1200.0,
+            15.0,
+            200.0,
+            800.0,
+            20.0,
+            2750.0,
+            2750.0,
+            0.08,
+            15.0e-6,
+        )
+    )
+    assert rp.pq_calls == [{"pressure_kpa": 800.0, "quality": 0.0, "z": [1.0], "kq": 1}]
+    assert rp.transport_calls == [{"temperature_k": 300.0, "density_mol_l": 10.0, "composition": [0.25, 0.75]}]
