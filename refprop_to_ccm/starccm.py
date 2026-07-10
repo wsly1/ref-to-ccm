@@ -323,7 +323,7 @@ public class apply_refprop_to_star extends StarMacro {{
       Class methodClass = Class.forName(methodClassName);
       MaterialProperty property = (MaterialProperty) material.getMaterialProperties().getMaterialProperty(propertyClass);
       property.setMethod(methodClass);
-      MaterialPropertyMethod method = (MaterialPropertyMethod) property.getMaterialPropertyMethod(methodClass);
+      MaterialPropertyMethod method = property.getMethod();
       Object interpolation = method.getClass().getMethod("getInterpolationTable").invoke(method);
       interpolation.getClass().getMethod("setTable", Table.class).invoke(interpolation, table);
       setTableColumn(interpolation, "setT", "Temperature", "Temperature", "Temperature");
