@@ -45,18 +45,23 @@ def render_macro(
     liquid_table_path = str(liquid_csv) if liquid_csv is not None else ""
     saturation_temperature_c = k_to_c(liquid.saturation_temperature_k)
     standard_state_temperature_c = k_to_c(liquid.standard_state_temperature_k)
-    property_write_mode = config.refrigerant_property_write_mode.strip().lower()
-    if property_write_mode not in REFRIGERANT_PROPERTY_WRITE_MODES:
+    vapor_property_write_mode = config.refrigerant_property_write_mode.strip().lower()
+    if vapor_property_write_mode not in REFRIGERANT_PROPERTY_WRITE_MODES:
         raise ValueError("refrigerant_property_write_mode must be table or polynomial.")
+    liquid_property_write_mode = (
+        config.liquid_refrigerant_property_write_mode or config.refrigerant_property_write_mode
+    ).strip().lower()
+    if liquid_property_write_mode not in REFRIGERANT_PROPERTY_WRITE_MODES:
+        raise ValueError("liquid_refrigerant_property_write_mode must be table or polynomial.")
     polynomial_degree = max(0, int(config.refrigerant_polynomial_degree))
     vapor_polynomials = None
     liquid_polynomials = None
-    if property_write_mode == "polynomial":
+    if vapor_property_write_mode == "polynomial":
         vapor_polynomials = _fit_property_polynomials(vapor_csv, polynomial_degree)
-        if config.liquid_property_mode == "table":
-            if liquid_csv is None:
-                raise ValueError("liquid_properties.csv is required for liquid polynomial material writes.")
-            liquid_polynomials = _fit_property_polynomials(liquid_csv, polynomial_degree)
+    if config.liquid_property_mode == "table" and liquid_property_write_mode == "polynomial":
+        if liquid_csv is None:
+            raise ValueError("liquid_properties.csv is required for liquid polynomial material writes.")
+        liquid_polynomials = _fit_property_polynomials(liquid_csv, polynomial_degree)
     vapor_entropy_assignment = ""
     vapor_entropy_log = '    sim.println("  Vapor Standard State Entropy J/kg-K = not available in source JSON");'
     if liquid.vapor_standard_state_entropy_j_per_kg_k is not None:
@@ -71,12 +76,12 @@ def render_macro(
         )
     vapor_temperature_assignment = (
         "    setVaporTemperaturePolynomials(material);"
-        if property_write_mode == "polynomial"
+        if vapor_property_write_mode == "polynomial"
         else "    setVaporTemperatureTables(material, table);"
     )
     liquid_temperature_assignment = (
         "      setLiquidTemperaturePolynomials(material);"
-        if property_write_mode == "polynomial"
+        if liquid_property_write_mode == "polynomial"
         else "      setLiquidTemperatureTables(material, table);"
     )
     vapor_polynomial_constants = _java_polynomial_constants("VAPOR", vapor_polynomials)
@@ -104,7 +109,8 @@ public class apply_refprop_to_star extends StarMacro {{
   private static final String VAPOR_PHASE_NAME = "{_java(config.vapor_phase_name)}";
   private static final String VAPOR_SPECIFIC_HEAT_SOURCE = "{_java(config.vapor_specific_heat_source)}";
   private static final String LIQUID_PROPERTY_MODE = "{_java(config.liquid_property_mode)}";
-  private static final String REFRIGERANT_PROPERTY_WRITE_MODE = "{_java(property_write_mode)}";
+  private static final String REFRIGERANT_PROPERTY_WRITE_MODE = "{_java(vapor_property_write_mode)}";
+  private static final String LIQUID_REFRIGERANT_PROPERTY_WRITE_MODE = "{_java(liquid_property_write_mode)}";
   private static final int REFRIGERANT_POLYNOMIAL_DEGREE = {polynomial_degree};
   private static final String LIQUID_TABLE = "{_java(liquid_table_path)}";
   private static final String VAPOR_TABLE = "{_java(str(vapor_csv))}";
@@ -129,7 +135,7 @@ public class apply_refprop_to_star extends StarMacro {{
     }}
     Table liquidTable = importLiquidTableBestEffort();
     Table vaporTable = importVaporTableBestEffort();
-    if ("table".equals(LIQUID_PROPERTY_MODE) && "table".equals(REFRIGERANT_PROPERTY_WRITE_MODE) && liquidTable == null) {{
+    if ("table".equals(LIQUID_PROPERTY_MODE) && "table".equals(LIQUID_REFRIGERANT_PROPERTY_WRITE_MODE) && liquidTable == null) {{
       throw new RuntimeException("[refprop-to-ccm] Stop saving because liquid table mode was selected but the liquid table was not imported.");
     }}
     if ("table".equals(REFRIGERANT_PROPERTY_WRITE_MODE) && vaporTable == null) {{
@@ -277,8 +283,8 @@ public class apply_refprop_to_star extends StarMacro {{
       sim.println("[refprop-to-ccm] Liquid property mode is saturation constants; no liquid table import.");
       return null;
     }}
-    if ("polynomial".equals(REFRIGERANT_PROPERTY_WRITE_MODE)) {{
-      sim.println("[refprop-to-ccm] Refrigerant property write mode is polynomial; no liquid table import.");
+    if ("polynomial".equals(LIQUID_REFRIGERANT_PROPERTY_WRITE_MODE)) {{
+      sim.println("[refprop-to-ccm] Liquid refrigerant property write mode is polynomial; no liquid table import.");
       return null;
     }}
     try {{
@@ -317,7 +323,7 @@ public class apply_refprop_to_star extends StarMacro {{
     }}
     setConstantWithUnitsOrDefault(material, "star.material.MolecularWeightProperty", {liquid.molecular_weight_kg_per_kmol:.12g}, "kg/kmol", {liquid.molecular_weight_kg_per_kmol:.12g}, "Molecular Weight");
     setConstantWithUnitsOrDefault(material, "star.energy.HeatOfFormationProperty", {liquid.liquid_standard_state_enthalpy_j_per_kg:.12g}, "J/kg", {liquid.liquid_standard_state_enthalpy_j_per_kg:.12g}, "Heat of Formation");
-    if ("table".equals(LIQUID_PROPERTY_MODE) && (table != null || "polynomial".equals(REFRIGERANT_PROPERTY_WRITE_MODE))) {{
+    if ("table".equals(LIQUID_PROPERTY_MODE) && (table != null || "polynomial".equals(LIQUID_REFRIGERANT_PROPERTY_WRITE_MODE))) {{
       sim.println("[refprop-to-ccm] Applying liquid temperature-dependent properties to " + material.getPresentationName());
 {liquid_temperature_assignment}
     }}

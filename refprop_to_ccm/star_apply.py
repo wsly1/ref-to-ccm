@@ -41,6 +41,7 @@ class StarApplyConfig:
     vapor_specific_heat_source: str = "cp_table"
     liquid_property_mode: str = "saturation"
     refrigerant_property_write_mode: str = "table"
+    liquid_refrigerant_property_write_mode: str | None = None
     refrigerant_polynomial_degree: int = 4
     coolant_xlsx: Path | None = None
     coolant_region_name: str = "Coolant"
@@ -187,6 +188,9 @@ def _render_refprop_macro(config: StarApplyConfig) -> str:
         starccm_exe=config.starccm_exe,
         output_directory=config.output_directory,
         refrigerant_property_write_mode=config.refrigerant_property_write_mode,
+        liquid_refrigerant_property_write_mode=(
+            config.liquid_refrigerant_property_write_mode or config.refrigerant_property_write_mode
+        ),
         refrigerant_polynomial_degree=config.refrigerant_polynomial_degree,
     )
     liquid_csv = config.liquid_csv if config.liquid_property_mode == "table" else None

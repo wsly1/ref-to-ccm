@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from refprop_to_ccm.config import ToolConfig
+from refprop_to_ccm.config import ToolConfig, load_config
 from refprop_to_ccm.models import LiquidProperties
 from refprop_to_ccm.starccm import _fit_property_polynomials, render_macro
 
@@ -97,10 +97,75 @@ def test_render_macro_can_write_refrigerant_properties_as_polynomials(tmp_path: 
     assert "setVaporTemperatureTables(material, table);" not in macro
 
 
+def test_render_macro_can_write_liquid_refrigerant_properties_as_polynomials_independently(tmp_path: Path) -> None:
+    vapor_csv = tmp_path / "vapor_properties.csv"
+    liquid_csv = tmp_path / "liquid_properties.csv"
+    csv_text = "\n".join(
+        [
+            "Temperature (C),Density (kg/m^3),Equivalent Specific Heat (J/kg-K),"
+            "Equivalent Thermal Conductivity (W/m-K),Equivalent Dynamic Viscosity (Pa-s),Enthalpy (J/kg)",
+            "0,1000,2000,0.1,0.001,300000",
+            "10,1020,2030,0.2,0.002,300500",
+            "20,1040,2060,0.3,0.003,301000",
+        ]
+    )
+    vapor_csv.write_text(csv_text, encoding="utf-8-sig")
+    liquid_csv.write_text(csv_text, encoding="utf-8-sig")
+
+    macro = render_macro(
+        _minimal_config(
+            refrigerant_property_write_mode="table",
+            liquid_refrigerant_property_write_mode="polynomial",
+            refrigerant_polynomial_degree=1,
+            liquid_property_mode="table",
+        ),
+        _minimal_liquid_properties(),
+        liquid_csv=liquid_csv,
+        vapor_csv=vapor_csv,
+        output_sim=Path("output.sim"),
+    )
+
+    assert 'REFRIGERANT_PROPERTY_WRITE_MODE = "table"' in macro
+    assert 'LIQUID_REFRIGERANT_PROPERTY_WRITE_MODE = "polynomial"' in macro
+    assert "setLiquidTemperaturePolynomials(material);" in macro
+    assert "private static final double[] LIQUID_DENSITY_POLY" in macro
+    assert "setVaporTemperatureTables(material, table);" in macro
+    assert "setVaporTemperaturePolynomials(material);" not in macro
+
+
+def test_load_config_keeps_legacy_polynomial_mode_for_liquid_refrigerant(tmp_path: Path) -> None:
+    config_file = tmp_path / "config.yml"
+    config_file.write_text(
+        "\n".join(
+            [
+                "fluid:",
+                "  name: R454C",
+                "saturation:",
+                "  type: pressure",
+                "  value: 0.8",
+                "gas_table:",
+                "  temperature_start: 30",
+                "  temperature_end: 40",
+                "starccm:",
+                "  continuum_name: Physics 1",
+                "  refrigerant_property_write_mode: polynomial",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config(config_file)
+
+    assert config.refrigerant_property_write_mode == "polynomial"
+    assert config.liquid_refrigerant_property_write_mode == "polynomial"
+
+
 def _minimal_config(
     *,
     refrigerant_property_write_mode: str = "table",
+    liquid_refrigerant_property_write_mode: str = "table",
     refrigerant_polynomial_degree: int = 4,
+    liquid_property_mode: str = "saturation",
 ) -> ToolConfig:
     return ToolConfig(
         fluid_name="R454C",
@@ -114,7 +179,7 @@ def _minimal_config(
         gas_temperature_end=20.0,
         gas_temperature_step=1.0,
         gas_temperature_unit="C",
-        liquid_property_mode="saturation",
+        liquid_property_mode=liquid_property_mode,
         liquid_temperature_start=0.0,
         liquid_temperature_end=0.0,
         liquid_temperature_step=1.0,
@@ -128,6 +193,7 @@ def _minimal_config(
         starccm_exe=None,
         output_directory=Path("out"),
         refrigerant_property_write_mode=refrigerant_property_write_mode,
+        liquid_refrigerant_property_write_mode=liquid_refrigerant_property_write_mode,
         refrigerant_polynomial_degree=refrigerant_polynomial_degree,
     )
 
