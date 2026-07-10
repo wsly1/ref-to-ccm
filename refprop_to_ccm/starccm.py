@@ -184,16 +184,57 @@ public class apply_refprop_to_star extends StarMacro {{
   }}
 
   private EulerianPhase getExistingPhase(EulerianMultiPhaseModel multiphase, String phaseName) {{
+    Phase phase = null;
     try {{
-      Phase phase = multiphase.getPhaseManager().getPhase(phaseName);
-      if (phase == null) {{
-        throw new RuntimeException("Phase not found: " + phaseName);
-      }}
-      sim.println("[refprop-to-ccm] Found phase: " + phaseName);
-      return (EulerianPhase) phase;
-    }} catch (Throwable ex) {{
-      throw new RuntimeException("Could not find phase '" + phaseName + "' in target continuum.", ex);
+      phase = multiphase.getPhaseManager().getPhase(phaseName);
+    }} catch (Throwable exactEx) {{
+      sim.println("[refprop-to-ccm] Exact phase lookup failed for '" + phaseName + "': " + exactEx.getMessage());
     }}
+    if (phase == null) {{
+      phase = findPhaseByPresentationName(multiphase, phaseName);
+    }}
+    if (phase == null) {{
+      throw new RuntimeException("Could not find phase '" + phaseName + "' in target continuum. Available phases: " + availablePhaseNames(multiphase) + ". Check the GUI liquid/gas phase names.");
+    }}
+    sim.println("[refprop-to-ccm] Found phase: " + phase.getPresentationName());
+    return (EulerianPhase) phase;
+  }}
+
+  private Phase findPhaseByPresentationName(EulerianMultiPhaseModel multiphase, String phaseName) {{
+    try {{
+      Object phaseObjects = multiphase.getPhaseManager().getClass().getMethod("getObjects").invoke(multiphase.getPhaseManager());
+      if (phaseObjects instanceof Iterable) {{
+        for (Object candidate : (Iterable) phaseObjects) {{
+          String candidateName = (String) candidate.getClass().getMethod("getPresentationName").invoke(candidate);
+          if (candidateName != null && candidateName.trim().equalsIgnoreCase(phaseName.trim())) {{
+            sim.println("[refprop-to-ccm] Matched phase by case-insensitive presentation name: " + candidateName);
+            return (Phase) candidate;
+          }}
+        }}
+      }}
+    }} catch (Throwable ex) {{
+      sim.println("[refprop-to-ccm] Phase list lookup failed while searching for '" + phaseName + "': " + ex.getMessage());
+    }}
+    return null;
+  }}
+
+  private String availablePhaseNames(EulerianMultiPhaseModel multiphase) {{
+    List<String> names = new ArrayList<String>();
+    try {{
+      Object phaseObjects = multiphase.getPhaseManager().getClass().getMethod("getObjects").invoke(multiphase.getPhaseManager());
+      if (phaseObjects instanceof Iterable) {{
+        for (Object candidate : (Iterable) phaseObjects) {{
+          try {{
+            names.add((String) candidate.getClass().getMethod("getPresentationName").invoke(candidate));
+          }} catch (Throwable nameEx) {{
+            names.add(String.valueOf(candidate));
+          }}
+        }}
+      }}
+    }} catch (Throwable ex) {{
+      names.add("phase list unavailable: " + ex.getMessage());
+    }}
+    return names.toString();
   }}
 
   private Material getMaterialFromPhase(EulerianPhase phase, List<String> materialModelClasses, String phaseLabel) {{

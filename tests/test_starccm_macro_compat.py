@@ -23,6 +23,20 @@ def test_render_macro_uses_starccm_2022_compatible_material_property_method_look
     assert "MaterialPropertyMethod method = property.getMethod();" in macro
 
 
+def test_render_macro_reports_available_phase_names_when_phase_lookup_fails() -> None:
+    macro = render_macro(
+        _minimal_config(),
+        _minimal_liquid_properties(),
+        liquid_csv=None,
+        vapor_csv=Path("vapor.csv"),
+        output_sim=Path("output.sim"),
+    )
+
+    assert "findPhaseByPresentationName" in macro
+    assert "availablePhaseNames(multiphase)" in macro
+    assert "equalsIgnoreCase" in macro
+
+
 def test_fit_property_polynomials_from_refprop_csv(tmp_path: Path) -> None:
     csv_path = tmp_path / "vapor_properties.csv"
     csv_path.write_text(
