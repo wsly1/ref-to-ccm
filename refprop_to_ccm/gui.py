@@ -70,6 +70,7 @@ class RefpropToCcmApp(tk.Tk):
         self.gas_table_mode = tk.StringVar(value="temperature")
         self.gas_viscosity_model = tk.StringVar(value="cicchitti")
         self.vapor_specific_heat_source = tk.StringVar(value="cp_table")
+        self.refrigerant_property_write_mode = tk.StringVar(value="table")
         self.liquid_property_mode = tk.StringVar(value="saturation")
         self.refrigerant_inlet_solve_mode = tk.StringVar(value="heat_transfer")
         self.refrigerant_outlet_enthalpy_direction = tk.StringVar(value="decrease")
@@ -79,6 +80,7 @@ class RefpropToCcmApp(tk.Tk):
         self.star_apply_save_mode = tk.StringVar(value="copy")
         self.star_apply_vapor_specific_heat_source = tk.StringVar(value="cp_table")
         self.star_apply_liquid_property_mode = tk.StringVar(value="saturation")
+        self.star_apply_refrigerant_property_write_mode = tk.StringVar(value="table")
         self.last_saturation_temperature_c: float | None = None
         self.coolant_vars: dict[str, tk.StringVar] = {}
         self.coolant_mode_widgets: dict[str, list[tk.Widget]] = {}
@@ -120,6 +122,7 @@ class RefpropToCcmApp(tk.Tk):
             "liquid_temp_start": tk.StringVar(value="0"),
             "liquid_temp_end": tk.StringVar(value="9"),
             "liquid_temp_step": tk.StringVar(value="0.1"),
+            "refrigerant_polynomial_degree": tk.StringVar(value="4"),
             "sim_file": tk.StringVar(value=""),
             "output_sim_file": tk.StringVar(value=""),
             "continuum_name": tk.StringVar(value="R454C"),
@@ -316,6 +319,16 @@ class RefpropToCcmApp(tk.Tk):
             value="enthalpy_table",
             variable=self.vapor_specific_heat_source,
         ).pack(side="left")
+        ttk.Label(cp_source_row, text="STAR写入方式").pack(side="left", padx=(18, 8))
+        ttk.Combobox(
+            cp_source_row,
+            textvariable=self.refrigerant_property_write_mode,
+            values=("table", "polynomial"),
+            state="readonly",
+            width=11,
+        ).pack(side="left", padx=(0, 8))
+        ttk.Label(cp_source_row, text="阶数").pack(side="left", padx=(0, 6))
+        ttk.Entry(cp_source_row, textvariable=self.vars["refrigerant_polynomial_degree"], width=5).pack(side="left")
 
         self.gas_quality_widgets: list[tk.Widget] = []
         self.gas_quality_widgets.extend(self._entry(gas_frame, 9, "干度点数", "gas_quality_points", "自动或整数"))
@@ -618,9 +631,32 @@ class RefpropToCcmApp(tk.Tk):
             state="readonly",
             width=14,
         )
-        cp_source_combo.pack(side="left")
+        cp_source_combo.pack(side="left", padx=(0, 18))
+        write_mode_label = ttk.Label(refprop_options, text="STAR写入方式")
+        write_mode_label.pack(side="left", padx=(0, 8))
+        write_mode_combo = ttk.Combobox(
+            refprop_options,
+            textvariable=self.star_apply_refrigerant_property_write_mode,
+            values=("table", "polynomial"),
+            state="readonly",
+            width=11,
+        )
+        write_mode_combo.pack(side="left", padx=(0, 8))
+        degree_label = ttk.Label(refprop_options, text="阶数")
+        degree_label.pack(side="left", padx=(0, 6))
+        degree_entry = ttk.Entry(refprop_options, textvariable=self.star_apply_vars["refrigerant_polynomial_degree"], width=5)
+        degree_entry.pack(side="left")
         self.star_apply_source_widgets["refprop"].extend(
-            [liquid_mode_label, liquid_mode_combo, cp_source_label, cp_source_combo]
+            [
+                liquid_mode_label,
+                liquid_mode_combo,
+                cp_source_label,
+                cp_source_combo,
+                write_mode_label,
+                write_mode_combo,
+                degree_label,
+                degree_entry,
+            ]
         )
 
         self.star_apply_source_widgets["coolant"].extend(
@@ -1081,6 +1117,7 @@ class RefpropToCcmApp(tk.Tk):
             "refrigerant_single_layer_mass_flow_kg_s": tk.StringVar(value=""),
             "refrigerant_vapor_volume_fraction": tk.StringVar(value=""),
             "refrigerant_inlet_temperature_c": tk.StringVar(value="98"),
+            "refrigerant_polynomial_degree": tk.StringVar(value="4"),
             "starccm_exe": tk.StringVar(value=self.vars["starccm_exe"].get()),
             "output_dir": tk.StringVar(value=str(output_dir)),
         }
@@ -1530,6 +1567,15 @@ class RefpropToCcmApp(tk.Tk):
         liquid_mode = self.liquid_property_mode.get()
         if liquid_mode not in {"saturation", "table"}:
             liquid_mode = "saturation"
+        refrigerant_property_write_mode = self.refrigerant_property_write_mode.get()
+        if refrigerant_property_write_mode not in {"table", "polynomial"}:
+            refrigerant_property_write_mode = "table"
+        refrigerant_polynomial_degree = _int_value(
+            self.vars["refrigerant_polynomial_degree"].get(),
+            "refrigerant polynomial degree",
+        )
+        if refrigerant_polynomial_degree < 0:
+            raise ValueError("refrigerant polynomial degree must be greater than or equal to 0.")
         if liquid_mode == "table":
             liquid_temp_start = _float_value(self.vars["liquid_temp_start"].get(), "液态温度起点")
             liquid_temp_end = _float_value(self.vars["liquid_temp_end"].get(), "液态温度终点")
@@ -1614,6 +1660,8 @@ class RefpropToCcmApp(tk.Tk):
             vapor_specific_heat_source=self.vapor_specific_heat_source.get(),
             starccm_exe=Path(starccm_exe_text) if starccm_exe_text else None,
             output_directory=Path(self.vars["output_dir"].get().strip() or "out"),
+            refrigerant_property_write_mode=refrigerant_property_write_mode,
+            refrigerant_polynomial_degree=refrigerant_polynomial_degree,
             gas_table_mode=gas_table_mode,
             quality_points=gas_quality_points,
             viscosity_model=gas_viscosity_model,
@@ -1960,6 +2008,15 @@ class RefpropToCcmApp(tk.Tk):
             continuum_name = "unused"
         starccm_exe_text = self.star_apply_vars["starccm_exe"].get().strip()
         liquid_csv_text = self.star_apply_vars["liquid_csv"].get().strip()
+        refrigerant_property_write_mode = self.star_apply_refrigerant_property_write_mode.get()
+        if refrigerant_property_write_mode not in {"table", "polynomial"}:
+            refrigerant_property_write_mode = "table"
+        refrigerant_polynomial_degree = _int_value(
+            self.star_apply_vars["refrigerant_polynomial_degree"].get(),
+            "refrigerant polynomial degree",
+        )
+        if refrigerant_polynomial_degree < 0:
+            raise ValueError("refrigerant polynomial degree must be greater than or equal to 0.")
         refrigerant_inlet_temperature_c = 98.0
         refrigerant_single_layer_mass_flow_kg_s = None
         refrigerant_vapor_volume_fraction = None
@@ -1996,6 +2053,8 @@ class RefpropToCcmApp(tk.Tk):
             else None,
             vapor_specific_heat_source=self.star_apply_vapor_specific_heat_source.get(),
             liquid_property_mode=self.star_apply_liquid_property_mode.get(),
+            refrigerant_property_write_mode=refrigerant_property_write_mode,
+            refrigerant_polynomial_degree=refrigerant_polynomial_degree,
             coolant_xlsx=Path(self.star_apply_vars["coolant_xlsx"].get().strip())
             if self.star_apply_vars["coolant_xlsx"].get().strip()
             else None,
@@ -2071,6 +2130,7 @@ class RefpropToCcmApp(tk.Tk):
             "gas_table_mode": self.gas_table_mode.get(),
             "gas_viscosity_model": self.gas_viscosity_model.get(),
             "vapor_specific_heat_source": self.vapor_specific_heat_source.get(),
+            "refrigerant_property_write_mode": self.refrigerant_property_write_mode.get(),
             "liquid_property_mode": self.liquid_property_mode.get(),
             "run_star": self.run_star.get(),
         }
@@ -2085,6 +2145,8 @@ class RefpropToCcmApp(tk.Tk):
             self.saturation_type.set(str(data["saturation_type"]))
         if data.get("vapor_specific_heat_source") in {"cp_table", "enthalpy_table"}:
             self.vapor_specific_heat_source.set(str(data["vapor_specific_heat_source"]))
+        if data.get("refrigerant_property_write_mode") in {"table", "polynomial"}:
+            self.refrigerant_property_write_mode.set(str(data["refrigerant_property_write_mode"]))
         if data.get("gas_table_mode") in {"temperature", "equivalent_quality"}:
             self.gas_table_mode.set(str(data["gas_table_mode"]))
         if data.get("gas_viscosity_model") in {"cicchitti", "mcadams"}:

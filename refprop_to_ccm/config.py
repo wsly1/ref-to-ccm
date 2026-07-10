@@ -35,6 +35,8 @@ class ToolConfig:
     vapor_specific_heat_source: str
     starccm_exe: Path | None
     output_directory: Path
+    refrigerant_property_write_mode: str = "table"
+    refrigerant_polynomial_degree: int = 4
     gas_table_mode: str = "temperature"
     quality_points: int | None = None
     viscosity_model: str = "cicchitti"
@@ -99,6 +101,8 @@ class ToolConfig:
             "liquid_phase_name": self.liquid_phase_name,
             "vapor_phase_name": self.vapor_phase_name,
             "vapor_specific_heat_source": self.vapor_specific_heat_source,
+            "refrigerant_property_write_mode": self.refrigerant_property_write_mode,
+            "refrigerant_polynomial_degree": str(self.refrigerant_polynomial_degree),
             "liquid_property_mode": self.liquid_property_mode,
             "gas_table_mode": self.gas_table_mode,
             "gas_quality_points": str(self.quality_points) if self.quality_points is not None else "auto",
@@ -162,6 +166,12 @@ def load_config(path: Path) -> ToolConfig:
     continuum_name = str(starccm.get("continuum_name") or "").strip()
     if not continuum_name:
         raise ValueError("starccm.continuum_name is required because the macro writes to an existing continuum.")
+    refrigerant_property_write_mode = str(starccm.get("refrigerant_property_write_mode") or "table").strip().lower()
+    if refrigerant_property_write_mode not in {"table", "polynomial"}:
+        raise ValueError("starccm.refrigerant_property_write_mode must be table or polynomial.")
+    refrigerant_polynomial_degree = int(starccm.get("refrigerant_polynomial_degree", 4))
+    if refrigerant_polynomial_degree < 0:
+        raise ValueError("starccm.refrigerant_polynomial_degree must be greater than or equal to 0.")
 
     refrigerant_solve_mode = refrigerant_inlet.get("solve_mode")
     if refrigerant_solve_mode is not None:
@@ -201,6 +211,8 @@ def load_config(path: Path) -> ToolConfig:
         vapor_specific_heat_source=specific_heat_source,
         starccm_exe=Path(str(starccm["starccm_exe"])) if starccm.get("starccm_exe") else None,
         output_directory=Path(str(output.get("directory") or "out")),
+        refrigerant_property_write_mode=refrigerant_property_write_mode,
+        refrigerant_polynomial_degree=refrigerant_polynomial_degree,
         gas_table_mode=gas_table_mode,
         quality_points=quality_points,
         viscosity_model=viscosity_model,

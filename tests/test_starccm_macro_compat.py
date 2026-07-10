@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from refprop_to_ccm.config import ToolConfig
 from refprop_to_ccm.models import LiquidProperties
-from refprop_to_ccm.starccm import render_macro
+from refprop_to_ccm.starccm import _fit_property_polynomials, render_macro
 
 
 def test_render_macro_uses_starccm_2022_compatible_material_property_method_lookup() -> None:
@@ -21,7 +23,71 @@ def test_render_macro_uses_starccm_2022_compatible_material_property_method_look
     assert "MaterialPropertyMethod method = property.getMethod();" in macro
 
 
-def _minimal_config() -> ToolConfig:
+def test_fit_property_polynomials_from_refprop_csv(tmp_path: Path) -> None:
+    csv_path = tmp_path / "vapor_properties.csv"
+    csv_path.write_text(
+        "\n".join(
+            [
+                "Temperature (C),Density (kg/m^3),Equivalent Specific Heat (J/kg-K),"
+                "Equivalent Thermal Conductivity (W/m-K),Equivalent Dynamic Viscosity (Pa-s),Enthalpy (J/kg)",
+                "0,1000,2000,0.1,0.001,300000",
+                "10,1020,2030,0.2,0.002,300500",
+                "20,1040,2060,0.3,0.003,301000",
+            ]
+        ),
+        encoding="utf-8-sig",
+    )
+
+    polynomials = _fit_property_polynomials(csv_path, degree=1)
+
+    assert polynomials.temperature_min_c == pytest.approx(0.0)
+    assert polynomials.temperature_max_c == pytest.approx(20.0)
+    assert polynomials.density == pytest.approx((1000.0, 2.0))
+    assert polynomials.specific_heat == pytest.approx((2000.0, 3.0))
+    assert polynomials.thermal_conductivity == pytest.approx((0.1, 0.01))
+    assert polynomials.dynamic_viscosity == pytest.approx((0.001, 0.0001))
+    assert polynomials.enthalpy == pytest.approx((300000.0, 50.0))
+
+
+def test_render_macro_can_write_refrigerant_properties_as_polynomials(tmp_path: Path) -> None:
+    vapor_csv = tmp_path / "vapor_properties.csv"
+    vapor_csv.write_text(
+        "\n".join(
+            [
+                "Temperature (C),Density (kg/m^3),Equivalent Specific Heat (J/kg-K),"
+                "Equivalent Thermal Conductivity (W/m-K),Equivalent Dynamic Viscosity (Pa-s),Enthalpy (J/kg)",
+                "0,1000,2000,0.1,0.001,300000",
+                "10,1020,2030,0.2,0.002,300500",
+                "20,1040,2060,0.3,0.003,301000",
+            ]
+        ),
+        encoding="utf-8-sig",
+    )
+
+    macro = render_macro(
+        _minimal_config(
+            refrigerant_property_write_mode="polynomial",
+            refrigerant_polynomial_degree=1,
+        ),
+        _minimal_liquid_properties(),
+        liquid_csv=None,
+        vapor_csv=vapor_csv,
+        output_sim=Path("output.sim"),
+    )
+
+    assert 'REFRIGERANT_PROPERTY_WRITE_MODE = "polynomial"' in macro
+    assert "setVaporTemperaturePolynomials(material);" in macro
+    assert "private static final double[] VAPOR_DENSITY_POLY" in macro
+    assert "setTemperaturePolynomial(" in macro
+    assert 'if ("table".equals(REFRIGERANT_PROPERTY_WRITE_MODE) && vaporTable == null)' in macro
+    assert "setVaporTemperatureTables(material, table);" not in macro
+
+
+def _minimal_config(
+    *,
+    refrigerant_property_write_mode: str = "table",
+    refrigerant_polynomial_degree: int = 4,
+) -> ToolConfig:
     return ToolConfig(
         fluid_name="R454C",
         fluid_components=None,
@@ -47,6 +113,8 @@ def _minimal_config() -> ToolConfig:
         vapor_specific_heat_source="cp_table",
         starccm_exe=None,
         output_directory=Path("out"),
+        refrigerant_property_write_mode=refrigerant_property_write_mode,
+        refrigerant_polynomial_degree=refrigerant_polynomial_degree,
     )
 
 
