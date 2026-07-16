@@ -130,6 +130,12 @@ class RefpropClient:
         pressure_kpa = pressure_pa / 1000.0
         flash = self.rp.TPFLSHdll(temperature_k, pressure_kpa, self.z)
         self._check(flash.ierr, flash.herr, f"calculating enthalpy for {fluid_name} at T={temperature_k} K, P={pressure_pa} Pa")
+        flash_enthalpy_j_per_mol = getattr(flash, "h", None)
+        if flash_enthalpy_j_per_mol is not None and math.isfinite(float(flash_enthalpy_j_per_mol)):
+            molecular_weight = self.rp.WMOLdll(self.z)
+            if molecular_weight <= 0.0:
+                raise RuntimeError("REFPROP returned a non-positive molecular weight for TP enthalpy conversion.")
+            return float(flash_enthalpy_j_per_mol) * 1000.0 / molecular_weight
         props = self._properties_td(temperature_k, flash.D, self.z)
         return props["enthalpy"]
 

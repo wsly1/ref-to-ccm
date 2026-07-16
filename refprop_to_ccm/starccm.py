@@ -14,6 +14,7 @@ from .units import k_to_c
 STARCCM_RUN_TIMEOUT_SECONDS = 5 * 60
 DEFAULT_REFRIGERANT_POLYNOMIAL_DEGREE = 4
 REFRIGERANT_PROPERTY_WRITE_MODES = {"table", "polynomial"}
+REFRIGERANT_PHASE_MODES = {"multiphase", "liquid", "vapor"}
 PROPERTY_CSV_COLUMNS = {
     "temperature": "Temperature (C)",
     "density": "Density (kg/m^3)",
@@ -39,10 +40,16 @@ def render_macro(
     config: ToolConfig,
     liquid: LiquidProperties,
     liquid_csv: Path | None,
-    vapor_csv: Path,
+    vapor_csv: Path | None,
     output_sim: Path,
 ) -> str:
-    liquid_table_path = str(liquid_csv) if liquid_csv is not None else ""
+    refrigerant_phase_mode = config.refrigerant_phase_mode.strip().lower()
+    if refrigerant_phase_mode not in REFRIGERANT_PHASE_MODES:
+        raise ValueError("refrigerant_phase_mode must be liquid, vapor, or multiphase.")
+    writes_liquid = refrigerant_phase_mode in {"liquid", "multiphase"}
+    writes_vapor = refrigerant_phase_mode in {"vapor", "multiphase"}
+    liquid_table_path = str(liquid_csv) if writes_liquid and liquid_csv is not None else ""
+    vapor_table_path = str(vapor_csv) if writes_vapor and vapor_csv is not None else ""
     saturation_temperature_c = k_to_c(liquid.saturation_temperature_k)
     standard_state_temperature_c = k_to_c(liquid.standard_state_temperature_k)
     vapor_property_write_mode = config.refrigerant_property_write_mode.strip().lower()
@@ -56,9 +63,11 @@ def render_macro(
     polynomial_degree = max(0, int(config.refrigerant_polynomial_degree))
     vapor_polynomials = None
     liquid_polynomials = None
-    if vapor_property_write_mode == "polynomial":
+    if writes_vapor and vapor_property_write_mode == "polynomial":
+        if vapor_csv is None:
+            raise ValueError("vapor_properties.csv is required for vapor polynomial material writes.")
         vapor_polynomials = _fit_property_polynomials(vapor_csv, polynomial_degree)
-    if config.liquid_property_mode == "table" and liquid_property_write_mode == "polynomial":
+    if writes_liquid and config.liquid_property_mode == "table" and liquid_property_write_mode == "polynomial":
         if liquid_csv is None:
             raise ValueError("liquid_properties.csv is required for liquid polynomial material writes.")
         liquid_polynomials = _fit_property_polynomials(liquid_csv, polynomial_degree)
@@ -86,6 +95,47 @@ def render_macro(
     )
     vapor_polynomial_constants = _java_polynomial_constants("VAPOR", vapor_polynomials)
     liquid_polynomial_constants = _java_polynomial_constants("LIQUID", liquid_polynomials)
+    if refrigerant_phase_mode == "multiphase":
+        phase_property_writes = """    Material liquidMaterial;
+    Material vaporMaterial;
+    try {
+      Material[] materials = getExistingPhaseMaterials(continuum);
+      liquidMaterial = materials[0];
+      vaporMaterial = materials[1];
+    } catch (Throwable ex) {
+      sim.println("[refprop-to-ccm] Existing phase/material lookup failed: " + ex.getMessage());
+      throw new RuntimeException("[refprop-to-ccm] Stop saving because target continuum/phase/material lookup failed.", ex);
+    }
+    Table liquidTable = importLiquidTableBestEffort();
+    Table vaporTable = importVaporTableBestEffort();
+    if ("table".equals(LIQUID_PROPERTY_MODE) && "table".equals(LIQUID_REFRIGERANT_PROPERTY_WRITE_MODE) && liquidTable == null) {
+      throw new RuntimeException("[refprop-to-ccm] Stop saving because liquid table mode was selected but the liquid table was not imported.");
+    }
+    if ("table".equals(REFRIGERANT_PROPERTY_WRITE_MODE) && vaporTable == null) {
+      throw new RuntimeException("[refprop-to-ccm] Stop saving because vapor table was not imported.");
+    }
+    setLiquidProperties(liquidMaterial, liquidTable);
+    setVaporProperties(vaporMaterial, vaporTable);"""
+    elif refrigerant_phase_mode == "liquid":
+        phase_property_writes = """    Material material = getExistingSinglePhaseMaterial(continuum, Arrays.asList(
+      "star.material.SinglePhaseLiquidModel",
+      "star.material.SingleComponentLiquidModel"
+    ), "liquid");
+    Table liquidTable = importLiquidTableBestEffort();
+    if ("table".equals(LIQUID_PROPERTY_MODE) && "table".equals(LIQUID_REFRIGERANT_PROPERTY_WRITE_MODE) && liquidTable == null) {
+      throw new RuntimeException("[refprop-to-ccm] Stop saving because liquid table mode was selected but the liquid table was not imported.");
+    }
+    setLiquidProperties(material, liquidTable);"""
+    else:
+        phase_property_writes = """    Material material = getExistingSinglePhaseMaterial(continuum, Arrays.asList(
+      "star.material.SinglePhaseGasModel",
+      "star.material.SingleComponentGasModel"
+    ), "gas");
+    Table vaporTable = importVaporTableBestEffort();
+    if ("table".equals(REFRIGERANT_PROPERTY_WRITE_MODE) && vaporTable == null) {
+      throw new RuntimeException("[refprop-to-ccm] Stop saving because vapor table was not imported.");
+    }
+    setVaporProperties(material, vaporTable);"""
     return f"""// Auto-generated by refprop-to-ccm. Edit the property mapping section if STAR-CCM+ reports missing paths.
 package macro;
 
@@ -105,6 +155,7 @@ public class apply_refprop_to_star extends StarMacro {{
   private final List<String> skippedWrites = new ArrayList<String>();
 
   private static final String CONTINUUM_NAME = "{_java(config.continuum_name)}";
+  private static final String REFRIGERANT_PHASE_MODE = "{_java(refrigerant_phase_mode)}";
   private static final String LIQUID_PHASE_NAME = "{_java(config.liquid_phase_name)}";
   private static final String VAPOR_PHASE_NAME = "{_java(config.vapor_phase_name)}";
   private static final String VAPOR_SPECIFIC_HEAT_SOURCE = "{_java(config.vapor_specific_heat_source)}";
@@ -113,7 +164,7 @@ public class apply_refprop_to_star extends StarMacro {{
   private static final String LIQUID_REFRIGERANT_PROPERTY_WRITE_MODE = "{_java(liquid_property_write_mode)}";
   private static final int REFRIGERANT_POLYNOMIAL_DEGREE = {polynomial_degree};
   private static final String LIQUID_TABLE = "{_java(liquid_table_path)}";
-  private static final String VAPOR_TABLE = "{_java(str(vapor_csv))}";
+  private static final String VAPOR_TABLE = "{_java(vapor_table_path)}";
   private static final String OUTPUT_SIM = "{_java(str(output_sim))}";
 {vapor_polynomial_constants}
 {liquid_polynomial_constants}
@@ -123,33 +174,12 @@ public class apply_refprop_to_star extends StarMacro {{
     sim.println("[refprop-to-ccm] Using existing continuum: " + CONTINUUM_NAME);
     PhysicsContinuum continuum = getExistingContinuum();
 
-    Material liquidMaterial = null;
-    Material vaporMaterial = null;
-    try {{
-      Material[] materials = getExistingPhaseMaterials(continuum);
-      liquidMaterial = materials[0];
-      vaporMaterial = materials[1];
-    }} catch (Throwable ex) {{
-      sim.println("[refprop-to-ccm] Existing phase/material lookup failed: " + ex.getMessage());
-      throw new RuntimeException("[refprop-to-ccm] Stop saving because target continuum/phase/material lookup failed.", ex);
-    }}
-    Table liquidTable = importLiquidTableBestEffort();
-    Table vaporTable = importVaporTableBestEffort();
-    if ("table".equals(LIQUID_PROPERTY_MODE) && "table".equals(LIQUID_REFRIGERANT_PROPERTY_WRITE_MODE) && liquidTable == null) {{
-      throw new RuntimeException("[refprop-to-ccm] Stop saving because liquid table mode was selected but the liquid table was not imported.");
-    }}
-    if ("table".equals(REFRIGERANT_PROPERTY_WRITE_MODE) && vaporTable == null) {{
-      throw new RuntimeException("[refprop-to-ccm] Stop saving because vapor table was not imported.");
-    }}
-    if (liquidMaterial != null) {{
-      setLiquidProperties(liquidMaterial, liquidTable);
-    }}
-    if (vaporMaterial != null) {{
-      setVaporProperties(vaporMaterial, vaporTable);
-    }}
+{phase_property_writes}
     writeLiquidValuesToLog();
     writeApplySummary();
-    sim.println("[refprop-to-ccm] Vapor table path: " + VAPOR_TABLE);
+    if ("vapor".equals(REFRIGERANT_PHASE_MODE) || "multiphase".equals(REFRIGERANT_PHASE_MODE)) {{
+      sim.println("[refprop-to-ccm] Vapor table path: " + VAPOR_TABLE);
+    }}
     sim.println("[refprop-to-ccm] Saving simulation as: " + OUTPUT_SIM);
     sim.saveState(OUTPUT_SIM);
   }}
@@ -165,6 +195,23 @@ public class apply_refprop_to_star extends StarMacro {{
     }} catch (Throwable ex) {{
       throw new RuntimeException("Could not find target physics continuum '" + CONTINUUM_NAME + "'. Check the GUI continuum name.", ex);
     }}
+  }}
+
+  private Material getExistingSinglePhaseMaterial(PhysicsContinuum continuum, List<String> materialModelClasses, String phaseLabel) {{
+    for (String className : materialModelClasses) {{
+      try {{
+        Class modelClass = Class.forName(className);
+        Object model = continuum.getModelManager().getModel(modelClass);
+        if (model != null) {{
+          Material material = (Material) model.getClass().getMethod("getMaterial").invoke(model);
+          sim.println("[refprop-to-ccm] Found single-phase " + phaseLabel + " material via " + className + ": " + material.getPresentationName());
+          return material;
+        }}
+      }} catch (Throwable ex) {{
+        sim.println("[refprop-to-ccm] Single-phase material lookup skipped for " + phaseLabel + ": " + className + " -> " + ex.getMessage());
+      }}
+    }}
+    throw new RuntimeException("No supported single-phase " + phaseLabel + " material model found on target continuum.");
   }}
 
   private Material[] getExistingPhaseMaterials(PhysicsContinuum continuum) {{

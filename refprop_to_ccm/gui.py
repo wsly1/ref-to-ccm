@@ -11,14 +11,27 @@ from tkinter import filedialog, messagebox, ttk
 
 from . import __version__
 from .config import ToolConfig
-from .core import generate_outputs, resolve_saturation, validate_gas_temperature_range, validate_liquid_temperature_range
+from .core import (
+    RefrigerantInletRefpropRequest,
+    calculate_refrigerant_inlet_from_refprop,
+    generate_outputs,
+    resolve_saturation,
+    validate_gas_temperature_range,
+    validate_liquid_temperature_range,
+)
 from .egasp_client import build_coolant_calculation, build_coolant_row
-from .inlet_conditions import RefrigerantInletCondition
-from .models import LiquidRow, VaporRow
+from .inlet_conditions import load_coolant_calculation_from_xlsx
+from .models import CoolantCalculation, LiquidRow, VaporRow
 from .refprop_client import RefpropClient
 from .report_extractor import ReportExtractResult, run_report_extraction
 from .scene_hardcopy import run_scene_hardcopy
-from .star_apply import StarApplyConfig, apply_star_from_outputs
+from .star_apply import StarApplyConfig, apply_star_from_outputs, load_coolant_row
+from .starccm_locator import (
+    choose_startup_starccm_path,
+    find_starccm_executable,
+    is_starccm_executable,
+    manual_starccm_path_from_config,
+)
 from .tables import write_coolant_xlsx, write_report_xlsx
 from .units import k_to_c
 from .updater import (
@@ -33,10 +46,6 @@ from .updater import (
 SATURATION_TEMPERATURE_TOLERANCE_C = 1.0e-4
 
 
-DEFAULT_STARCCM_EXE = (
-    r"E:\Program Files\STAR-CCM_202602\starccm_2026\21.02.007-R8"
-    r"\STAR-CCM+21.02.007-R8\star\lib\win64\clang20.1vc14.2-r8\lib\starccm+.exe"
-)
 SATURATION_TABLE_OFFSET_C = 0.001
 
 CONFIG_FILE = Path(sys.executable if getattr(sys, 'frozen', False) else __file__).parent / ".refprop_to_ccm_config.json"
@@ -72,6 +81,7 @@ class RefpropToCcmApp(tk.Tk):
         self.vapor_specific_heat_source = tk.StringVar(value="cp_table")
         self.refrigerant_property_write_mode = tk.StringVar(value="table")
         self.liquid_refrigerant_property_write_mode = tk.StringVar(value="table")
+        self.refrigerant_phase_mode = tk.StringVar(value="multiphase")
         self.liquid_property_mode = tk.StringVar(value="saturation")
         self.refrigerant_inlet_solve_mode = tk.StringVar(value="heat_transfer")
         self.refrigerant_outlet_enthalpy_direction = tk.StringVar(value="decrease")
@@ -91,22 +101,35 @@ class RefpropToCcmApp(tk.Tk):
         self.star_apply_phase_widgets: dict[str, list[tk.Widget]] = {}
         self.star_apply_liquid_phase_label: ttk.Label | None = None
         self.star_apply_output_sim_widgets: list[tk.Widget] = []
+        self.refprop_phase_name_widgets: list[tk.Widget] = []
         self.star_apply_status_var = tk.StringVar(value="等待输入")
         self.update_status_var = tk.StringVar(value=f"当前版本: {__version__}")
         self._update_check_running = False
         self._config = _load_config()
-        saved_starccm = self._config.get("starccm_exe", "")
-        if saved_starccm:
-            starccm_default = saved_starccm
-        elif Path(DEFAULT_STARCCM_EXE).exists():
-            starccm_default = DEFAULT_STARCCM_EXE
-        else:
-            starccm_default = ""
+        saved_starccm = str(self._config.get("starccm_exe", "")).strip()
+        discovered_starccm = (
+            None
+            if saved_starccm and is_starccm_executable(saved_starccm)
+            else find_starccm_executable()
+        )
+        starccm_default = choose_startup_starccm_path(
+            saved_starccm,
+            discovered_starccm,
+        )
+        self._starccm_was_auto_detected = (
+            discovered_starccm is not None
+            and starccm_default == str(discovered_starccm)
+            and starccm_default != saved_starccm
+        )
+        if starccm_default != saved_starccm:
+            self._config["starccm_exe"] = starccm_default
+            _save_config(self._config)
         saved_sim = self._config.get("report_sim_file", "")
         self.report_sim_file = tk.StringVar(value=saved_sim)
-        self.report_starccm_exe = tk.StringVar(value=starccm_default)
-        self.report_sim_file.trace_add("write", lambda *_: self._save_report_config())
-        self.report_starccm_exe.trace_add("write", lambda *_: self._save_report_config())
+        self.starccm_exe_var = tk.StringVar(value=starccm_default)
+        self.report_starccm_exe = self.starccm_exe_var
+        self.report_sim_file.trace_add("write", lambda *_: self._save_automatic_config())
+        self.starccm_exe_var.trace_add("write", lambda *_: self._save_automatic_config())
         self.report_status_var = tk.StringVar(value="等待输入")
         self.report_copy_file = tk.BooleanVar(value=True)
         self.report_result: ReportExtractResult | None = None
@@ -130,7 +153,7 @@ class RefpropToCcmApp(tk.Tk):
             "continuum_name": tk.StringVar(value="R454C"),
             "liquid_phase_name": tk.StringVar(value="liquid"),
             "vapor_phase_name": tk.StringVar(value="gas"),
-            "starccm_exe": tk.StringVar(value=DEFAULT_STARCCM_EXE if Path(DEFAULT_STARCCM_EXE).exists() else ""),
+            "starccm_exe": self.starccm_exe_var,
             "output_dir": tk.StringVar(value=str(Path.cwd() / "out")),
             "refrigerant_heat_transfer_w": tk.StringVar(value="13885"),
             "refrigerant_total_mass_flow_kg_s": tk.StringVar(value=""),
@@ -140,10 +163,13 @@ class RefpropToCcmApp(tk.Tk):
         }
 
         self._build()
+        if self._starccm_was_auto_detected:
+            self._append_log(f"已自动找到STAR-CCM+程序：{starccm_default}")
         self._sync_saturation_labels()
         self._sync_gas_pressure_state()
         self._sync_gas_table_mode_state()
         self._sync_liquid_table_state()
+        self._sync_refrigerant_phase_mode_state()
         self._sync_refrigerant_inlet_mode_state()
         self._wire_validation()
         self.after(2000, self._check_for_updates_on_startup)
@@ -420,9 +446,17 @@ class RefpropToCcmApp(tk.Tk):
         self._file_entry(star_frame, 0, "原始 sim 文件", "sim_file", [("STAR-CCM+ sim", "*.sim"), ("All files", "*.*")])
         self._file_entry(star_frame, 1, "另存为 sim 文件", "output_sim_file", [("STAR-CCM+ sim", "*.sim"), ("All files", "*.*")])
         self._entry(star_frame, 2, "目标连续体名称", "continuum_name", "")
-        self._entry(star_frame, 3, "液相名称", "liquid_phase_name", "")
-        self._entry(star_frame, 4, "气相名称", "vapor_phase_name", "")
-        self._file_entry(star_frame, 5, "STAR-CCM+ 程序", "starccm_exe", [("Executable", "*.exe"), ("All files", "*.*")])
+        self.refprop_phase_name_widgets = [
+            *self._entry(star_frame, 3, "液相名称", "liquid_phase_name", ""),
+            *self._entry(star_frame, 4, "气相名称", "vapor_phase_name", ""),
+        ]
+        self._file_entry(
+            star_frame,
+            5,
+            "STAR-CCM+ 程序（自动查找并记住）",
+            "starccm_exe",
+            [("Executable", "*.exe"), ("All files", "*.*")],
+        )
         ttk.Checkbutton(star_frame, text="生成后立即运行 STAR-CCM+", variable=self.run_star).grid(
             row=6, column=0, columnspan=3, sticky="w", pady=6
         )
@@ -432,76 +466,36 @@ class RefpropToCcmApp(tk.Tk):
             foreground="#666",
             wraplength=420,
         ).grid(row=7, column=0, columnspan=3, sticky="w", pady=(0, 6))
-
-        inlet_frame = self._section(root, "制冷剂入口条件计算", 2, 1)
-        solve_row = ttk.Frame(inlet_frame)
-        solve_row.grid(row=0, column=0, columnspan=3, sticky="ew", pady=6)
-        ttk.Label(solve_row, text="计算方式").pack(side="left", padx=(0, 12))
+        phase_mode_row = ttk.Frame(star_frame)
+        phase_mode_row.grid(row=8, column=0, columnspan=3, sticky="ew", pady=(4, 0))
+        ttk.Label(phase_mode_row, text="制冷剂模型").pack(side="left", padx=(0, 12))
         ttk.Radiobutton(
-            solve_row,
-            text="输入换热量算流量",
-            value="heat_transfer",
-            variable=self.refrigerant_inlet_solve_mode,
-            command=self._sync_refrigerant_inlet_mode_state,
-        ).pack(side="left", padx=(0, 18))
+            phase_mode_row,
+            text="多相",
+            value="multiphase",
+            variable=self.refrigerant_phase_mode,
+            command=self._sync_refrigerant_phase_mode_state,
+        ).pack(side="left", padx=(0, 16))
         ttk.Radiobutton(
-            solve_row,
-            text="输入总流量算换热量",
-            value="mass_flow",
-            variable=self.refrigerant_inlet_solve_mode,
-            command=self._sync_refrigerant_inlet_mode_state,
-        ).pack(side="left", padx=(0, 18))
+            phase_mode_row,
+            text="液相",
+            value="liquid",
+            variable=self.refrigerant_phase_mode,
+            command=self._sync_refrigerant_phase_mode_state,
+        ).pack(side="left", padx=(0, 16))
         ttk.Radiobutton(
-            solve_row,
-            text="输入换热量和总流量算出口温度",
-            value="outlet_temperature",
-            variable=self.refrigerant_inlet_solve_mode,
-            command=self._sync_refrigerant_inlet_mode_state,
+            phase_mode_row,
+            text="气相",
+            value="vapor",
+            variable=self.refrigerant_phase_mode,
+            command=self._sync_refrigerant_phase_mode_state,
         ).pack(side="left")
-        self.refrigerant_heat_transfer_widgets = self._entry(
-            inlet_frame, 1, "制冷剂换热量 W", "refrigerant_heat_transfer_w", "默认按参考表 F12=13.885 kW"
-        )
-        self.refrigerant_mass_flow_widgets = self._entry(
-            inlet_frame, 2, "制冷剂总质量流量 kg/s", "refrigerant_total_mass_flow_kg_s", "用于反算换热量"
-        )
-        self._entry(inlet_frame, 3, "制冷剂层数", "refrigerant_layer_count", "用于总流量除以层数得到单层质量流量")
-        self._entry(inlet_frame, 4, "制冷剂入口温度 C", "refrigerant_inlet_temperature_c", "支持液体、气体或气液混合入口")
-        self.refrigerant_outlet_temperature_widgets = self._entry(
-            inlet_frame, 5, "制冷剂出口温度 C", "refrigerant_outlet_temperature_c", "按饱和压力和该温度计算出口焓"
-        )
-        direction_row = ttk.Frame(inlet_frame)
-        direction_row.grid(row=6, column=0, columnspan=3, sticky="ew", pady=6)
-        direction_label = ttk.Label(direction_row, text="出口焓方向")
-        direction_label.pack(side="left", padx=(0, 12))
-        direction_increase = ttk.Radiobutton(
-            direction_row,
-            text="出口焓升高（蒸发/吸热）",
-            value="increase",
-            variable=self.refrigerant_outlet_enthalpy_direction,
-            command=self._sync_refrigerant_inlet_mode_state,
-        )
-        direction_increase.pack(side="left", padx=(0, 18))
-        direction_decrease = ttk.Radiobutton(
-            direction_row,
-            text="出口焓降低（冷凝/放热）",
-            value="decrease",
-            variable=self.refrigerant_outlet_enthalpy_direction,
-            command=self._sync_refrigerant_inlet_mode_state,
-        )
-        direction_decrease.pack(side="left")
-        self.refrigerant_outlet_direction_widgets = [direction_label, direction_increase, direction_decrease]
         ttk.Label(
-            inlet_frame,
-            text="生成物性文件时同步计算：总/单层质量流量、换热量、入口温度、气体体积分数和 STAR-CCM+ 体积分数组。",
+            star_frame,
+            text="液相或气相模式只查找并写入对应的单相连续体材料；多相模式写入两个相。",
             foreground="#666",
             wraplength=420,
-        ).grid(row=7, column=0, columnspan=3, sticky="w", pady=(2, 6))
-        self.refrigerant_inlet_result_var = tk.StringVar(value="尚未计算制冷剂入口条件")
-        ttk.Entry(
-            inlet_frame,
-            textvariable=self.refrigerant_inlet_result_var,
-            state="readonly",
-        ).grid(row=8, column=0, columnspan=3, sticky="ew", pady=(2, 0))
+        ).grid(row=9, column=0, columnspan=3, sticky="w", pady=(2, 0))
 
         out_frame = self._section(root, "输出", 3, 1)
         self._directory_entry(out_frame, 0, "目录", "output_dir")
@@ -732,7 +726,13 @@ class RefpropToCcmApp(tk.Tk):
             "liquid": liquid_phase_widgets,
             "vapor": vapor_phase_widgets,
         }
-        self._star_file_entry(star_frame, 6, "STAR-CCM+ 程序", "starccm_exe", [("Executable", "*.exe"), ("All files", "*.*")])
+        self._star_file_entry(
+            star_frame,
+            6,
+            "STAR-CCM+ 程序（自动查找并记住）",
+            "starccm_exe",
+            [("Executable", "*.exe"), ("All files", "*.*")],
+        )
         ttk.Checkbutton(star_frame, text="生成后立即运行 STAR-CCM+", variable=self.star_apply_run).grid(
             row=7, column=0, columnspan=3, sticky="w", pady=6
         )
@@ -756,6 +756,155 @@ class RefpropToCcmApp(tk.Tk):
         self._sync_star_apply_source_state()
         self._sync_star_apply_save_mode_state()
         return outer
+
+    def _build_refrigerant_inlet_calculation_section(
+        self,
+        root: ttk.Frame,
+        row: int,
+    ) -> ttk.LabelFrame:
+        inlet_frame = self._section(root, "制冷剂入口条件计算（查询REFPROP）", row, 0)
+        inlet_frame.grid_configure(columnspan=2)
+        self._entry(inlet_frame, 0, "制冷剂", "fluid_name", "例如R454C、R134A或REFPROP混合物名称")
+
+        saturation_type_row = ttk.Frame(inlet_frame)
+        saturation_type_row.grid(row=1, column=0, columnspan=3, sticky="ew", pady=6)
+        ttk.Label(saturation_type_row, text="饱和条件类型").pack(side="left", padx=(0, 12))
+        ttk.Radiobutton(
+            saturation_type_row,
+            text="输入饱和压力",
+            value="pressure",
+            variable=self.saturation_type,
+            command=self._on_saturation_type_changed,
+        ).pack(side="left", padx=(0, 18))
+        ttk.Radiobutton(
+            saturation_type_row,
+            text="输入饱和温度",
+            value="temperature",
+            variable=self.saturation_type,
+            command=self._on_saturation_type_changed,
+        ).pack(side="left")
+        self.inlet_saturation_label = ttk.Label(inlet_frame, text="")
+        self.inlet_saturation_label.grid(row=2, column=0, sticky="w", pady=6)
+        ttk.Entry(inlet_frame, textvariable=self.vars["saturation_value"]).grid(
+            row=2,
+            column=1,
+            sticky="ew",
+            pady=6,
+        )
+
+        solve_row = ttk.Frame(inlet_frame)
+        solve_row.grid(row=3, column=0, columnspan=3, sticky="ew", pady=6)
+        ttk.Label(solve_row, text="计算方式").pack(side="left", padx=(0, 12))
+        ttk.Radiobutton(
+            solve_row,
+            text="输入换热量算流量",
+            value="heat_transfer",
+            variable=self.refrigerant_inlet_solve_mode,
+            command=self._sync_refrigerant_inlet_mode_state,
+        ).pack(side="left", padx=(0, 18))
+        ttk.Radiobutton(
+            solve_row,
+            text="输入总流量算换热量",
+            value="mass_flow",
+            variable=self.refrigerant_inlet_solve_mode,
+            command=self._sync_refrigerant_inlet_mode_state,
+        ).pack(side="left", padx=(0, 18))
+        ttk.Radiobutton(
+            solve_row,
+            text="输入换热量和总流量算出口温度",
+            value="outlet_temperature",
+            variable=self.refrigerant_inlet_solve_mode,
+            command=self._sync_refrigerant_inlet_mode_state,
+        ).pack(side="left")
+        self.refrigerant_heat_transfer_widgets = self._entry(
+            inlet_frame,
+            4,
+            "制冷剂换热量 W",
+            "refrigerant_heat_transfer_w",
+            "默认按参考表F12=13.885 kW",
+        )
+        self.refrigerant_mass_flow_widgets = self._entry(
+            inlet_frame,
+            5,
+            "制冷剂总质量流量 kg/s",
+            "refrigerant_total_mass_flow_kg_s",
+            "用于反算换热量",
+        )
+        self._entry(
+            inlet_frame,
+            6,
+            "制冷剂层数",
+            "refrigerant_layer_count",
+            "用于总流量除以层数得到单层质量流量",
+        )
+        self._entry(
+            inlet_frame,
+            7,
+            "制冷剂入口温度 C",
+            "refrigerant_inlet_temperature_c",
+            "填写完成后才查询REFPROP入口焓",
+        )
+        self.refrigerant_outlet_temperature_widgets = self._entry(
+            inlet_frame,
+            8,
+            "制冷剂出口温度 C",
+            "refrigerant_outlet_temperature_c",
+            "按当前饱和压力和出口温度查询REFPROP出口焓",
+        )
+        direction_row = ttk.Frame(inlet_frame)
+        direction_row.grid(row=9, column=0, columnspan=3, sticky="ew", pady=6)
+        direction_label = ttk.Label(direction_row, text="出口焓方向")
+        direction_label.pack(side="left", padx=(0, 12))
+        direction_increase = ttk.Radiobutton(
+            direction_row,
+            text="出口焓升高（蒸发/吸热）",
+            value="increase",
+            variable=self.refrigerant_outlet_enthalpy_direction,
+            command=self._sync_refrigerant_inlet_mode_state,
+        )
+        direction_increase.pack(side="left", padx=(0, 18))
+        direction_decrease = ttk.Radiobutton(
+            direction_row,
+            text="出口焓降低（冷凝/放热）",
+            value="decrease",
+            variable=self.refrigerant_outlet_enthalpy_direction,
+            command=self._sync_refrigerant_inlet_mode_state,
+        )
+        direction_decrease.pack(side="left")
+        self.refrigerant_outlet_direction_widgets = [
+            direction_label,
+            direction_increase,
+            direction_decrease,
+        ]
+
+        ttk.Label(
+            inlet_frame,
+            text=(
+                "先填写入口参数，再单独查询REFPROP并计算总/单层流量、换热量、出口温度和气体体积分数。"
+                "计算结果会自动填入下方制冷剂入口宏字段。"
+            ),
+            foreground="#666",
+            wraplength=820,
+        ).grid(row=10, column=0, columnspan=3, sticky="w", pady=(2, 6))
+        self.refrigerant_inlet_result_var = tk.StringVar(value="尚未计算制冷剂入口条件")
+        ttk.Entry(
+            inlet_frame,
+            textvariable=self.refrigerant_inlet_result_var,
+            state="readonly",
+        ).grid(row=11, column=0, columnspan=3, sticky="ew", pady=(2, 6))
+        calculation_actions = ttk.Frame(inlet_frame)
+        calculation_actions.grid(row=12, column=0, columnspan=3, sticky="w", pady=(4, 0))
+        ttk.Button(
+            calculation_actions,
+            text="计算入口条件",
+            command=lambda: self._start_refrigerant_inlet_calculation(False),
+        ).pack(side="left")
+        ttk.Button(
+            calculation_actions,
+            text="计算并生成防冻液/制冷剂合并表",
+            command=lambda: self._start_refrigerant_inlet_calculation(True),
+        ).pack(side="left", padx=8)
+        return inlet_frame
 
     def _build_star_inlet_conditions_page(self) -> ttk.Frame:
         outer = ttk.Frame(self.container)
@@ -834,7 +983,13 @@ class RefpropToCcmApp(tk.Tk):
         self._star_entry(star_frame, 3, "目标连续体名称", "continuum_name")
         self._star_entry(star_frame, 4, "制冷剂液相名称", "liquid_phase_name")
         self._star_entry(star_frame, 5, "制冷剂气相名称", "vapor_phase_name")
-        self._star_file_entry(star_frame, 6, "STAR-CCM+ 程序", "starccm_exe", [("Executable", "*.exe"), ("All files", "*.*")])
+        self._star_file_entry(
+            star_frame,
+            6,
+            "STAR-CCM+ 程序（自动查找并记住）",
+            "starccm_exe",
+            [("Executable", "*.exe"), ("All files", "*.*")],
+        )
         ttk.Checkbutton(star_frame, text="生成后立即运行 STAR-CCM+", variable=self.star_apply_run).grid(
             row=7, column=0, columnspan=3, sticky="w", pady=6
         )
@@ -845,11 +1000,13 @@ class RefpropToCcmApp(tk.Tk):
             wraplength=420,
         ).grid(row=8, column=0, columnspan=3, sticky="w", pady=(0, 6))
 
-        out_frame = self._section(root, "输出", 2, 0)
+        self._build_refrigerant_inlet_calculation_section(root, 2)
+
+        out_frame = self._section(root, "输出", 3, 0)
         self._star_directory_entry(out_frame, 0, "宏输出目录", "output_dir")
 
         action_frame = ttk.Frame(root)
-        action_frame.grid(row=2, column=1, sticky="ew", padx=8, pady=8)
+        action_frame.grid(row=3, column=1, sticky="ew", padx=8, pady=8)
         ttk.Button(
             action_frame,
             text="生成/输出防冻液入口宏",
@@ -862,7 +1019,7 @@ class RefpropToCcmApp(tk.Tk):
         ).pack(side="left", padx=8)
         ttk.Button(action_frame, text="打开输出目录", command=self._open_star_apply_output_dir).pack(side="left", padx=8)
 
-        ttk.Label(root, textvariable=self.star_apply_status_var).grid(row=3, column=0, columnspan=2, sticky="ew", pady=(8, 4))
+        ttk.Label(root, textvariable=self.star_apply_status_var).grid(row=4, column=0, columnspan=2, sticky="ew", pady=(8, 4))
 
         self._sync_star_apply_save_mode_state()
         return outer
@@ -884,7 +1041,12 @@ class RefpropToCcmApp(tk.Tk):
         ttk.Entry(form_frame, textvariable=self.report_sim_file).grid(row=0, column=1, sticky="ew", pady=6)
         ttk.Button(form_frame, text="浏览", command=self._browse_report_sim_file).grid(row=0, column=2, padx=(8, 0))
 
-        ttk.Label(form_frame, text="STAR-CCM+ 程序").grid(row=1, column=0, sticky="w", pady=6)
+        ttk.Label(form_frame, text="STAR-CCM+ 程序（自动查找并记住）").grid(
+            row=1,
+            column=0,
+            sticky="w",
+            pady=6,
+        )
         ttk.Entry(form_frame, textvariable=self.report_starccm_exe).grid(row=1, column=1, sticky="ew", pady=6)
         ttk.Button(form_frame, text="浏览", command=self._browse_report_starccm_exe).grid(row=1, column=2, padx=(8, 0))
 
@@ -949,8 +1111,8 @@ class RefpropToCcmApp(tk.Tk):
     def _show_report_page(self) -> None:
         self._show_page("report")
 
-    def _save_report_config(self) -> None:
-        self._config["starccm_exe"] = self.report_starccm_exe.get().strip()
+    def _save_automatic_config(self) -> None:
+        self._config["starccm_exe"] = self.starccm_exe_var.get().strip()
         self._config["report_sim_file"] = self.report_sim_file.get().strip()
         _save_config(self._config)
 
@@ -1145,7 +1307,7 @@ class RefpropToCcmApp(tk.Tk):
             "refrigerant_vapor_volume_fraction": tk.StringVar(value=""),
             "refrigerant_inlet_temperature_c": tk.StringVar(value="98"),
             "refrigerant_polynomial_degree": tk.StringVar(value="4"),
-            "starccm_exe": tk.StringVar(value=self.vars["starccm_exe"].get()),
+            "starccm_exe": self.starccm_exe_var,
             "output_dir": tk.StringVar(value=str(output_dir)),
         }
 
@@ -1362,6 +1524,7 @@ class RefpropToCcmApp(tk.Tk):
         for key in ("fluid_name", "saturation_value", "temp_start", "gas_quality_points", "liquid_temp_start", "liquid_temp_end", "liquid_temp_step"):
             self.vars[key].trace_add("write", lambda *_: self._update_temperature_warning())
         self.gas_table_mode.trace_add("write", lambda *_: self._sync_gas_table_mode_state())
+        self.refrigerant_phase_mode.trace_add("write", lambda *_: self._sync_refrigerant_phase_mode_state())
         self.refrigerant_inlet_solve_mode.trace_add("write", lambda *_: self._sync_refrigerant_inlet_mode_state())
 
     def _on_saturation_type_changed(self) -> None:
@@ -1370,9 +1533,13 @@ class RefpropToCcmApp(tk.Tk):
 
     def _sync_saturation_labels(self) -> None:
         if self.saturation_type.get() == "pressure":
-            self.saturation_label.configure(text="饱和压力 MPa")
+            label_text = "饱和压力 MPa"
         else:
-            self.saturation_label.configure(text="饱和温度 C")
+            label_text = "饱和温度 C"
+        self.saturation_label.configure(text=label_text)
+        inlet_label = getattr(self, "inlet_saturation_label", None)
+        if inlet_label is not None:
+            inlet_label.configure(text=label_text)
 
     def _sync_gas_pressure_state(self) -> None:
         state = "disabled" if self.use_saturation_pressure.get() else "normal"
@@ -1393,6 +1560,17 @@ class RefpropToCcmApp(tk.Tk):
                 widget.configure(state=state)
         if self.liquid_property_mode.get() == "table" and self.last_saturation_temperature_c is not None:
             self._suggest_liquid_temperature_end(self.last_saturation_temperature_c)
+
+    def _sync_refrigerant_phase_mode_state(self) -> None:
+        phase_mode = self.refrigerant_phase_mode.get()
+        if phase_mode not in {"multiphase", "liquid", "vapor"}:
+            phase_mode = "multiphase"
+            self.refrigerant_phase_mode.set(phase_mode)
+        for widget in self.refprop_phase_name_widgets:
+            if phase_mode == "multiphase":
+                widget.grid()
+            else:
+                widget.grid_remove()
 
     def _sync_refrigerant_inlet_mode_state(self) -> None:
         mode = self.refrigerant_inlet_solve_mode.get()
@@ -1517,39 +1695,15 @@ class RefpropToCcmApp(tk.Tk):
         self.saturation_result_var.set(
             f"饱和温度：{sat_c:.6g} C；饱和压力：{result.summary['saturation']['pressure_MPa']:.6g} MPa"
         )
-        refrigerant_inlet = result.summary.get("refrigerant_inlet_condition")
-        if isinstance(refrigerant_inlet, dict):
-            single_flow = refrigerant_inlet.get("single_layer_mass_flow_kg_s")
-            total_flow = refrigerant_inlet.get("total_mass_flow_kg_s")
-            heat_transfer = refrigerant_inlet.get("heat_transfer_w")
-            inlet_temp = refrigerant_inlet.get("inlet_temperature_c")
-            outlet_temp = refrigerant_inlet.get("outlet_temperature_c")
-            vapor_fraction = refrigerant_inlet.get("vapor_volume_fraction")
-            star_vector = refrigerant_inlet.get("starccm_volume_fraction")
-            inlet_text = (
-                f"总质量流量：{float(total_flow):.6g} kg/s；"
-                f"单层质量流量：{float(single_flow):.6g} kg/s；"
-                f"换热量：{float(heat_transfer):.6g} W；"
-                f"入口温度：{float(inlet_temp):.6g} C；"
-                f"出口温度：{float(outlet_temp):.6g} C；"
-                f"气体体积分数：{float(vapor_fraction):.6g}；"
-                f"STAR：{star_vector}"
-            )
-            self.refrigerant_inlet_result_var.set(inlet_text)
-            if self.star_apply_vars:
-                self.star_apply_vars["refrigerant_single_layer_mass_flow_kg_s"].set(f"{float(single_flow):.12g}")
-                self.star_apply_vars["refrigerant_inlet_temperature_c"].set(f"{float(inlet_temp):.12g}")
-                self.star_apply_vars["refrigerant_vapor_volume_fraction"].set(f"{float(vapor_fraction):.12g}")
         self._update_temperature_warning()
         self.status_var.set("完成")
         self._append_log(result.to_display_text())
-        if isinstance(refrigerant_inlet, dict):
-            self._append_log(f"制冷剂入口条件: {self.refrigerant_inlet_result_var.get()}")
-            self._write_combined_coolant_refrigerant_workbook(result, refrigerant_inlet)
-        self._append_log(f"液相参数: {result.liquid_json}")
+        if result.liquid_json is not None:
+            self._append_log(f"液相参数: {result.liquid_json}")
         if result.liquid_csv is not None:
             self._append_log(f"液相表格: {result.liquid_csv}")
-        self._append_log(f"气相表格: {result.vapor_csv}")
+        if result.vapor_csv is not None:
+            self._append_log(f"气相表格: {result.vapor_csv}")
         self._append_log(f"STAR宏: {result.macro_file}")
         partial_failure = False
         star_summary_text = ""
@@ -1580,24 +1734,39 @@ class RefpropToCcmApp(tk.Tk):
 
         sat_type = self.saturation_type.get()
         saturation_value = _float_value(self.vars["saturation_value"].get(), "饱和压力或饱和温度")
+        refrigerant_phase_mode = self.refrigerant_phase_mode.get()
+        if refrigerant_phase_mode not in {"multiphase", "liquid", "vapor"}:
+            refrigerant_phase_mode = "multiphase"
+        writes_liquid = refrigerant_phase_mode in {"liquid", "multiphase"}
+        writes_vapor = refrigerant_phase_mode in {"vapor", "multiphase"}
         gas_table_mode = self.gas_table_mode.get()
         if gas_table_mode not in {"temperature", "equivalent_quality"}:
             gas_table_mode = "temperature"
-        temp_start = _float_value(self.vars["temp_start"].get(), "温度起点")
-        temp_end = _float_value(self.vars["temp_end"].get(), "温度终点")
-        temp_step = _float_value(self.vars["temp_step"].get(), "温度步长")
-        if temp_step <= 0:
-            raise ValueError("温度步长必须大于0。")
-        if gas_table_mode == "temperature" and temp_end < temp_start:
-            raise ValueError("温度终点不能小于温度起点。")
-        gas_quality_points = _optional_int_value(self.vars["gas_quality_points"].get(), "干度点数")
-        if gas_quality_points is not None and gas_quality_points < 2:
-            raise ValueError("干度点数必须是“自动”或大于等于2的整数。")
-        gas_viscosity_model = self.gas_viscosity_model.get()
-        if gas_viscosity_model not in {"cicchitti", "mcadams"}:
+        if writes_vapor:
+            temp_start = _float_value(self.vars["temp_start"].get(), "温度起点")
+            temp_end = _float_value(self.vars["temp_end"].get(), "温度终点")
+            temp_step = _float_value(self.vars["temp_step"].get(), "温度步长")
+            if temp_step <= 0:
+                raise ValueError("温度步长必须大于0。")
+            if gas_table_mode == "temperature" and temp_end < temp_start:
+                raise ValueError("温度终点不能小于温度起点。")
+            gas_quality_points = _optional_int_value(self.vars["gas_quality_points"].get(), "干度点数")
+            if gas_quality_points is not None and gas_quality_points < 2:
+                raise ValueError("干度点数必须是“自动”或大于等于2的整数。")
+            gas_viscosity_model = self.gas_viscosity_model.get()
+            if gas_viscosity_model not in {"cicchitti", "mcadams"}:
+                gas_viscosity_model = "cicchitti"
+        else:
+            gas_table_mode = "temperature"
+            temp_start = 0.0
+            temp_end = 0.0
+            temp_step = 0.1
+            gas_quality_points = None
             gas_viscosity_model = "cicchitti"
         liquid_mode = self.liquid_property_mode.get()
         if liquid_mode not in {"saturation", "table"}:
+            liquid_mode = "saturation"
+        if not writes_liquid:
             liquid_mode = "saturation"
         refrigerant_property_write_mode = self.refrigerant_property_write_mode.get()
         if refrigerant_property_write_mode not in {"table", "polynomial"}:
@@ -1611,7 +1780,7 @@ class RefpropToCcmApp(tk.Tk):
         )
         if refrigerant_polynomial_degree < 0:
             raise ValueError("refrigerant polynomial degree must be greater than or equal to 0.")
-        if liquid_mode == "table":
+        if writes_liquid and liquid_mode == "table":
             liquid_temp_start = _float_value(self.vars["liquid_temp_start"].get(), "液态温度起点")
             liquid_temp_end = _float_value(self.vars["liquid_temp_end"].get(), "液态温度终点")
             liquid_temp_step = _float_value(self.vars["liquid_temp_step"].get(), "液态温度步长")
@@ -1625,43 +1794,8 @@ class RefpropToCcmApp(tk.Tk):
             liquid_temp_step = 0.1
 
         gas_pressure = None
-        if not self.use_saturation_pressure.get():
+        if writes_vapor and not self.use_saturation_pressure.get():
             gas_pressure = _float_value(self.vars["gas_pressure"].get(), "气态压力")
-
-        refrigerant_solve_mode = self.refrigerant_inlet_solve_mode.get()
-        if refrigerant_solve_mode not in {"heat_transfer", "mass_flow", "outlet_temperature"}:
-            refrigerant_solve_mode = "heat_transfer"
-        refrigerant_heat_transfer_w = None
-        refrigerant_total_mass_flow_kg_s = None
-        refrigerant_outlet_temperature_c = None
-        refrigerant_outlet_enthalpy_direction = None
-        if refrigerant_solve_mode in {"heat_transfer", "outlet_temperature"}:
-            refrigerant_heat_transfer_w = _float_value(self.vars["refrigerant_heat_transfer_w"].get(), "制冷剂换热量")
-            if refrigerant_heat_transfer_w <= 0:
-                raise ValueError("制冷剂换热量必须大于0。")
-        if refrigerant_solve_mode in {"mass_flow", "outlet_temperature"}:
-            refrigerant_total_mass_flow_kg_s = _float_value(
-                self.vars["refrigerant_total_mass_flow_kg_s"].get(),
-                "制冷剂总质量流量",
-            )
-            if refrigerant_total_mass_flow_kg_s <= 0:
-                raise ValueError("制冷剂总质量流量必须大于0。")
-        refrigerant_layer_count = _int_value(self.vars["refrigerant_layer_count"].get(), "制冷剂层数")
-        if refrigerant_layer_count <= 0:
-            raise ValueError("制冷剂层数必须大于0。")
-        refrigerant_inlet_temperature_c = _float_value(
-            self.vars["refrigerant_inlet_temperature_c"].get(),
-            "制冷剂入口温度",
-        )
-        if refrigerant_solve_mode in {"heat_transfer", "mass_flow"}:
-            refrigerant_outlet_temperature_c = _float_value(
-                self.vars["refrigerant_outlet_temperature_c"].get(),
-                "制冷剂出口温度",
-            )
-        else:
-            refrigerant_outlet_enthalpy_direction = self.refrigerant_outlet_enthalpy_direction.get()
-            if refrigerant_outlet_enthalpy_direction not in {"increase", "decrease"}:
-                raise ValueError("请选择制冷剂出口焓方向。")
 
         sim_file = Path(self.vars["sim_file"].get().strip() or "input.sim")
         output_sim = Path(self.vars["output_sim_file"].get().strip() or sim_file.with_name(sim_file.stem + "_refprop.sim"))
@@ -1698,16 +1832,17 @@ class RefpropToCcmApp(tk.Tk):
             refrigerant_property_write_mode=refrigerant_property_write_mode,
             liquid_refrigerant_property_write_mode=liquid_refrigerant_property_write_mode,
             refrigerant_polynomial_degree=refrigerant_polynomial_degree,
+            refrigerant_phase_mode=refrigerant_phase_mode,
             gas_table_mode=gas_table_mode,
             quality_points=gas_quality_points,
             viscosity_model=gas_viscosity_model,
-            refrigerant_inlet_solve_mode=refrigerant_solve_mode,
-            refrigerant_heat_transfer_w=refrigerant_heat_transfer_w,
-            refrigerant_total_mass_flow_kg_s=refrigerant_total_mass_flow_kg_s,
-            refrigerant_layer_count=refrigerant_layer_count,
-            refrigerant_inlet_temperature_c=refrigerant_inlet_temperature_c,
-            refrigerant_outlet_temperature_c=refrigerant_outlet_temperature_c,
-            refrigerant_outlet_enthalpy_direction=refrigerant_outlet_enthalpy_direction,
+            refrigerant_inlet_solve_mode=None,
+            refrigerant_heat_transfer_w=None,
+            refrigerant_total_mass_flow_kg_s=None,
+            refrigerant_layer_count=None,
+            refrigerant_inlet_temperature_c=None,
+            refrigerant_outlet_temperature_c=None,
+            refrigerant_outlet_enthalpy_direction=None,
         )
 
         if validate_range:
@@ -1715,8 +1850,10 @@ class RefpropToCcmApp(tk.Tk):
             refprop.load_fluid(config.fluid_name, config.fluid_components)
             saturation = resolve_saturation(refprop, config)
             self.last_saturation_temperature_c = k_to_c(saturation.temperature_k)
-            validate_gas_temperature_range(config, saturation.temperature_k)
-            validate_liquid_temperature_range(config, saturation.temperature_k)
+            if writes_vapor:
+                validate_gas_temperature_range(config, saturation.temperature_k)
+            if writes_liquid:
+                validate_liquid_temperature_range(config, saturation.temperature_k)
 
         self._update_temperature_warning()
         return config
@@ -1907,55 +2044,196 @@ class RefpropToCcmApp(tk.Tk):
         )
         return output_path, coolant_row, calculation
 
-    def _write_combined_coolant_refrigerant_workbook(self, result, refrigerant_payload: dict) -> None:
+    def _build_refrigerant_inlet_refprop_request(self) -> RefrigerantInletRefpropRequest:
+        fluid_name = self.vars["fluid_name"].get().strip()
+        if not fluid_name:
+            raise ValueError("请输入制冷剂名称。")
+
+        saturation_type = self.saturation_type.get().strip().lower()
+        if saturation_type not in {"pressure", "temperature"}:
+            raise ValueError("请选择饱和压力或饱和温度。")
+        saturation_value = _float_value(
+            self.vars["saturation_value"].get(),
+            "饱和压力或饱和温度",
+        )
+
+        solve_mode = self.refrigerant_inlet_solve_mode.get().strip().lower()
+        if solve_mode not in {"heat_transfer", "mass_flow", "outlet_temperature"}:
+            raise ValueError("请选择制冷剂入口条件计算方式。")
+        heat_transfer_w = None
+        total_mass_flow_kg_s = None
+        outlet_temperature_c = None
+        outlet_enthalpy_direction = None
+        if solve_mode in {"heat_transfer", "outlet_temperature"}:
+            heat_transfer_w = _float_value(
+                self.vars["refrigerant_heat_transfer_w"].get(),
+                "制冷剂换热量",
+            )
+            if heat_transfer_w <= 0.0:
+                raise ValueError("制冷剂换热量必须大于0。")
+        if solve_mode in {"mass_flow", "outlet_temperature"}:
+            total_mass_flow_kg_s = _float_value(
+                self.vars["refrigerant_total_mass_flow_kg_s"].get(),
+                "制冷剂总质量流量",
+            )
+            if total_mass_flow_kg_s <= 0.0:
+                raise ValueError("制冷剂总质量流量必须大于0。")
+
+        layer_count = _int_value(
+            self.vars["refrigerant_layer_count"].get(),
+            "制冷剂层数",
+        )
+        if layer_count <= 0:
+            raise ValueError("制冷剂层数必须大于0。")
+        inlet_temperature_c = _float_value(
+            self.vars["refrigerant_inlet_temperature_c"].get(),
+            "制冷剂入口温度",
+        )
+        if solve_mode in {"heat_transfer", "mass_flow"}:
+            outlet_temperature_c = _float_value(
+                self.vars["refrigerant_outlet_temperature_c"].get(),
+                "制冷剂出口温度",
+            )
+        else:
+            outlet_enthalpy_direction = self.refrigerant_outlet_enthalpy_direction.get().strip().lower()
+            if outlet_enthalpy_direction not in {"increase", "decrease"}:
+                raise ValueError("请选择制冷剂出口焓方向。")
+
+        return RefrigerantInletRefpropRequest(
+            fluid_name=fluid_name,
+            fluid_components=None,
+            saturation_type=saturation_type,
+            saturation_value=saturation_value,
+            saturation_unit="MPa" if saturation_type == "pressure" else "C",
+            solve_mode=solve_mode,
+            heat_transfer_w=heat_transfer_w,
+            total_mass_flow_kg_s=total_mass_flow_kg_s,
+            layer_count=layer_count,
+            inlet_temperature_c=inlet_temperature_c,
+            outlet_temperature_c=outlet_temperature_c,
+            outlet_enthalpy_direction=outlet_enthalpy_direction,
+        )
+
+    def _start_refrigerant_inlet_calculation(self, write_combined_table: bool) -> None:
         try:
-            output_path, coolant_row, calculation = self._build_current_coolant_table_inputs()
-            liquid_payload = json.loads(Path(result.liquid_json).read_text(encoding="utf-8"))
-            refrigerant = RefrigerantInletCondition(
-                total_mass_flow_kg_s=float(refrigerant_payload["total_mass_flow_kg_s"]),
-                single_layer_mass_flow_kg_s=float(refrigerant_payload["single_layer_mass_flow_kg_s"]),
-                inlet_temperature_c=float(refrigerant_payload["inlet_temperature_c"]),
-                quality=float(refrigerant_payload["quality"]),
-                vapor_volume_fraction=float(refrigerant_payload["vapor_volume_fraction"]),
-                liquid_volume_fraction=float(refrigerant_payload["liquid_volume_fraction"]),
-                starccm_volume_fraction=str(refrigerant_payload["starccm_volume_fraction"]),
-                solve_mode=str(refrigerant_payload.get("solve_mode") or "heat_transfer"),
-                heat_transfer_w=float(refrigerant_payload["heat_transfer_w"]),
-                outlet_temperature_c=float(refrigerant_payload["outlet_temperature_c"]),
-                inlet_enthalpy_j_per_kg=float(refrigerant_payload["inlet_enthalpy_j_per_kg"]),
-                outlet_enthalpy_j_per_kg=float(refrigerant_payload["outlet_enthalpy_j_per_kg"]),
-            )
-            saturation_temperature_c = float(liquid_payload["saturation_temperature_c"])
-            saturated_liquid_row = LiquidRow(
-                temperature_c=saturation_temperature_c,
-                density_kg_per_m3=float(liquid_payload["density_kg_per_m3"]),
-                equivalent_specific_heat_j_per_kg_k=float(liquid_payload["specific_heat_j_per_kg_k"]),
-                equivalent_thermal_conductivity_w_per_m_k=float(liquid_payload["thermal_conductivity_w_per_m_k"]),
-                equivalent_dynamic_viscosity_pa_s=float(liquid_payload["dynamic_viscosity_pa_s"]),
-                enthalpy_j_per_kg=float(liquid_payload["saturated_liquid_enthalpy_j_per_kg"]),
-            )
-            saturated_vapor_row = VaporRow(
-                temperature_c=saturation_temperature_c,
-                density_kg_per_m3=float(liquid_payload["saturated_vapor_density_kg_per_m3"]),
-                equivalent_specific_heat_j_per_kg_k=float(liquid_payload["saturated_vapor_specific_heat_j_per_kg_k"]),
-                equivalent_thermal_conductivity_w_per_m_k=float(
-                    liquid_payload["saturated_vapor_thermal_conductivity_w_per_m_k"]
-                ),
-                equivalent_dynamic_viscosity_pa_s=float(liquid_payload["saturated_vapor_dynamic_viscosity_pa_s"]),
-                enthalpy_j_per_kg=float(liquid_payload["saturated_vapor_enthalpy_j_per_kg"]),
-            )
-            write_coolant_xlsx(
-                output_path,
-                coolant_row,
-                calculation,
-                refrigerant=refrigerant,
-                saturated_liquid_row=saturated_liquid_row,
-                saturated_vapor_row=saturated_vapor_row,
+            request = self._build_refrigerant_inlet_refprop_request()
+            combined_path = None
+            if write_combined_table:
+                combined_path_text = self.star_apply_vars["coolant_xlsx"].get().strip()
+                if not combined_path_text:
+                    raise ValueError("请先选择防冻液Excel文件。")
+                combined_path = Path(combined_path_text)
+                if not combined_path.exists():
+                    raise FileNotFoundError(f"防冻液Excel文件不存在：{combined_path}")
+        except Exception as exc:
+            messagebox.showerror("输入错误", str(exc), parent=self)
+            return
+
+        self.star_apply_status_var.set("正在查询REFPROP并计算制冷剂入口条件...")
+        thread = threading.Thread(
+            target=self._run_refrigerant_inlet_calculation_worker,
+            args=(request, combined_path),
+            daemon=True,
+        )
+        thread.start()
+
+    def _run_refrigerant_inlet_calculation_worker(
+        self,
+        request: RefrigerantInletRefpropRequest,
+        combined_path: Path | None,
+    ) -> None:
+        try:
+            result = calculate_refrigerant_inlet_from_refprop(request)
+            written_path = (
+                self._write_combined_coolant_refrigerant_workbook(combined_path, result)
+                if combined_path is not None
+                else None
             )
         except Exception as exc:
-            self._append_log(f"合并防冻液/制冷剂表失败: {exc}")
+            self.after(0, self._finish_refrigerant_inlet_calculation_error, exc)
             return
-        self._append_log(f"防冻液/制冷剂合并表: {output_path.resolve()}")
+        self.after(
+            0,
+            self._finish_refrigerant_inlet_calculation_success,
+            result,
+            written_path,
+        )
+
+    def _finish_refrigerant_inlet_calculation_success(self, result, written_path: Path | None) -> None:
+        condition = result.condition
+        inlet_text = (
+            f"总质量流量：{condition.total_mass_flow_kg_s:.6g} kg/s；"
+            f"单层质量流量：{condition.single_layer_mass_flow_kg_s:.6g} kg/s；"
+            f"换热量：{condition.heat_transfer_w:.6g} W；"
+            f"入口温度：{condition.inlet_temperature_c:.6g} C；"
+            f"出口温度：{condition.outlet_temperature_c:.6g} C；"
+            f"气体体积分数：{condition.vapor_volume_fraction:.6g}；"
+            f"STAR：{condition.starccm_volume_fraction}"
+        )
+        self.refrigerant_inlet_result_var.set(inlet_text)
+        self.star_apply_vars["refrigerant_single_layer_mass_flow_kg_s"].set(
+            f"{condition.single_layer_mass_flow_kg_s:.12g}"
+        )
+        self.star_apply_vars["refrigerant_inlet_temperature_c"].set(
+            f"{condition.inlet_temperature_c:.12g}"
+        )
+        self.star_apply_vars["refrigerant_vapor_volume_fraction"].set(
+            f"{condition.vapor_volume_fraction:.12g}"
+        )
+        self.star_apply_status_var.set("制冷剂入口条件计算完成")
+        self._append_log(f"制冷剂入口条件：{inlet_text}")
+        message = "制冷剂入口条件已根据当前输入从REFPROP查询并计算完成。"
+        if written_path is not None:
+            self._append_log(f"防冻液/制冷剂合并表：{written_path.resolve()}")
+            message += f"\n\n合并表：{written_path.resolve()}"
+        messagebox.showinfo("完成", message, parent=self)
+
+    def _finish_refrigerant_inlet_calculation_error(self, exc: Exception) -> None:
+        self.star_apply_status_var.set("制冷剂入口条件计算失败")
+        self._append_log(f"制冷剂入口条件计算失败：{exc}")
+        messagebox.showerror("计算失败", str(exc), parent=self)
+
+    @staticmethod
+    def _write_combined_coolant_refrigerant_workbook(output_path: Path, result) -> Path:
+        coolant_row = load_coolant_row(output_path)
+        workbook_values = load_coolant_calculation_from_xlsx(output_path)
+        calculation = CoolantCalculation(
+            row=coolant_row,
+            solve_mode="workbook",
+            volume_flow_l_min=workbook_values.volume_flow_l_min,
+            mass_flow_kg_s=workbook_values.mass_flow_kg_s,
+            single_plate_mass_flow_kg_s=workbook_values.single_plate_mass_flow_kg_s,
+            inlet_temperature_c=workbook_values.inlet_temperature_c,
+            outlet_temperature_c=workbook_values.outlet_temperature_c,
+            heat_transfer_w=workbook_values.heat_transfer_w,
+        )
+        liquid = result.liquid
+        saturation_temperature_c = k_to_c(result.saturation.temperature_k)
+        saturated_liquid_row = LiquidRow(
+            temperature_c=saturation_temperature_c,
+            density_kg_per_m3=liquid.density_kg_per_m3,
+            equivalent_specific_heat_j_per_kg_k=liquid.specific_heat_j_per_kg_k,
+            equivalent_thermal_conductivity_w_per_m_k=liquid.thermal_conductivity_w_per_m_k,
+            equivalent_dynamic_viscosity_pa_s=liquid.dynamic_viscosity_pa_s,
+            enthalpy_j_per_kg=liquid.saturated_liquid_enthalpy_j_per_kg,
+        )
+        saturated_vapor_row = VaporRow(
+            temperature_c=saturation_temperature_c,
+            density_kg_per_m3=liquid.saturated_vapor_density_kg_per_m3,
+            equivalent_specific_heat_j_per_kg_k=liquid.saturated_vapor_specific_heat_j_per_kg_k,
+            equivalent_thermal_conductivity_w_per_m_k=liquid.saturated_vapor_thermal_conductivity_w_per_m_k,
+            equivalent_dynamic_viscosity_pa_s=liquid.saturated_vapor_dynamic_viscosity_pa_s,
+            enthalpy_j_per_kg=liquid.saturated_vapor_enthalpy_j_per_kg,
+        )
+        write_coolant_xlsx(
+            output_path,
+            coolant_row,
+            calculation,
+            refrigerant=result.condition,
+            saturated_liquid_row=saturated_liquid_row,
+            saturated_vapor_row=saturated_vapor_row,
+        )
+        return output_path
 
     def _coolant_optional_float(self, key: str) -> float | None:
         value = self.coolant_vars[key].get().strip()
@@ -2074,6 +2352,14 @@ class RefpropToCcmApp(tk.Tk):
                 self.star_apply_vars["refrigerant_vapor_volume_fraction"].get(),
                 "制冷剂气体体积分数",
             )
+            if (
+                refrigerant_vapor_volume_fraction is not None
+                and not 0.0 <= refrigerant_vapor_volume_fraction <= 1.0
+            ):
+                raise ValueError(
+                    "制冷剂气体体积分数必须在0到1之间，"
+                    f"当前值为{refrigerant_vapor_volume_fraction:.12g}；程序未自动修正。"
+                )
         return StarApplyConfig(
             source_type=source_type,
             sim_file=sim_file,
@@ -2172,6 +2458,9 @@ class RefpropToCcmApp(tk.Tk):
             "vapor_specific_heat_source": self.vapor_specific_heat_source.get(),
             "refrigerant_property_write_mode": self.refrigerant_property_write_mode.get(),
             "liquid_refrigerant_property_write_mode": self.liquid_refrigerant_property_write_mode.get(),
+            "refrigerant_phase_mode": self.refrigerant_phase_mode.get(),
+            "refrigerant_inlet_solve_mode": self.refrigerant_inlet_solve_mode.get(),
+            "refrigerant_outlet_enthalpy_direction": self.refrigerant_outlet_enthalpy_direction.get(),
             "liquid_property_mode": self.liquid_property_mode.get(),
             "run_star": self.run_star.get(),
         }
@@ -2180,8 +2469,11 @@ class RefpropToCcmApp(tk.Tk):
         fields = data.get("fields", {})
         if isinstance(fields, dict):
             for key, value in fields.items():
-                if key in self.vars:
+                if key in self.vars and key != "starccm_exe":
                     self.vars[key].set(str(value))
+        manual_starccm_path = manual_starccm_path_from_config(data)
+        if manual_starccm_path is not None:
+            self.starccm_exe_var.set(manual_starccm_path)
         if data.get("saturation_type") in {"pressure", "temperature"}:
             self.saturation_type.set(str(data["saturation_type"]))
         if data.get("vapor_specific_heat_source") in {"cp_table", "enthalpy_table"}:
@@ -2192,6 +2484,18 @@ class RefpropToCcmApp(tk.Tk):
             self.liquid_refrigerant_property_write_mode.set(str(data["liquid_refrigerant_property_write_mode"]))
         elif data.get("refrigerant_property_write_mode") in {"table", "polynomial"}:
             self.liquid_refrigerant_property_write_mode.set(str(data["refrigerant_property_write_mode"]))
+        if data.get("refrigerant_phase_mode") in {"multiphase", "liquid", "vapor"}:
+            self.refrigerant_phase_mode.set(str(data["refrigerant_phase_mode"]))
+        if data.get("refrigerant_inlet_solve_mode") in {
+            "heat_transfer",
+            "mass_flow",
+            "outlet_temperature",
+        }:
+            self.refrigerant_inlet_solve_mode.set(str(data["refrigerant_inlet_solve_mode"]))
+        if data.get("refrigerant_outlet_enthalpy_direction") in {"increase", "decrease"}:
+            self.refrigerant_outlet_enthalpy_direction.set(
+                str(data["refrigerant_outlet_enthalpy_direction"])
+            )
         if data.get("gas_table_mode") in {"temperature", "equivalent_quality"}:
             self.gas_table_mode.set(str(data["gas_table_mode"]))
         if data.get("gas_viscosity_model") in {"cicchitti", "mcadams"}:
@@ -2208,6 +2512,8 @@ class RefpropToCcmApp(tk.Tk):
         self._sync_gas_pressure_state()
         self._sync_gas_table_mode_state()
         self._sync_liquid_table_state()
+        self._sync_refrigerant_phase_mode_state()
+        self._sync_refrigerant_inlet_mode_state()
         self._update_temperature_warning()
 
 

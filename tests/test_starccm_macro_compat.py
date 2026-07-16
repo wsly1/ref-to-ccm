@@ -37,6 +37,53 @@ def test_render_macro_reports_available_phase_names_when_phase_lookup_fails() ->
     assert "equalsIgnoreCase" in macro
 
 
+def test_render_macro_for_liquid_mode_targets_only_a_single_phase_liquid_material() -> None:
+    macro = render_macro(
+        _minimal_config(refrigerant_phase_mode="liquid"),
+        _minimal_liquid_properties(),
+        liquid_csv=None,
+        vapor_csv=None,
+        output_sim=Path("output.sim"),
+    )
+
+    assert 'REFRIGERANT_PHASE_MODE = "liquid"' in macro
+    assert "getExistingSinglePhaseMaterial(continuum" in macro
+    assert '"star.material.SinglePhaseLiquidModel"' in macro
+    assert "setLiquidProperties(material, liquidTable);" in macro
+    assert "setVaporProperties(material, vaporTable);" not in macro
+
+
+def test_render_macro_for_vapor_mode_targets_only_a_single_phase_gas_material() -> None:
+    macro = render_macro(
+        _minimal_config(refrigerant_phase_mode="vapor"),
+        _minimal_liquid_properties(),
+        liquid_csv=None,
+        vapor_csv=Path("vapor.csv"),
+        output_sim=Path("output.sim"),
+    )
+
+    assert 'REFRIGERANT_PHASE_MODE = "vapor"' in macro
+    assert "getExistingSinglePhaseMaterial(continuum" in macro
+    assert '"star.material.SinglePhaseGasModel"' in macro
+    assert "setLiquidProperties(material, liquidTable);" not in macro
+    assert "setVaporProperties(material, vaporTable);" in macro
+
+
+def test_render_macro_for_multiphase_mode_keeps_both_phase_material_writes() -> None:
+    macro = render_macro(
+        _minimal_config(refrigerant_phase_mode="multiphase"),
+        _minimal_liquid_properties(),
+        liquid_csv=None,
+        vapor_csv=Path("vapor.csv"),
+        output_sim=Path("output.sim"),
+    )
+
+    assert 'REFRIGERANT_PHASE_MODE = "multiphase"' in macro
+    assert "EulerianMultiPhaseModel" in macro
+    assert "setLiquidProperties(liquidMaterial, liquidTable);" in macro
+    assert "setVaporProperties(vaporMaterial, vaporTable);" in macro
+
+
 def test_fit_property_polynomials_from_refprop_csv(tmp_path: Path) -> None:
     csv_path = tmp_path / "vapor_properties.csv"
     csv_path.write_text(
@@ -166,6 +213,7 @@ def _minimal_config(
     liquid_refrigerant_property_write_mode: str = "table",
     refrigerant_polynomial_degree: int = 4,
     liquid_property_mode: str = "saturation",
+    refrigerant_phase_mode: str = "multiphase",
 ) -> ToolConfig:
     return ToolConfig(
         fluid_name="R454C",
@@ -195,6 +243,7 @@ def _minimal_config(
         refrigerant_property_write_mode=refrigerant_property_write_mode,
         liquid_refrigerant_property_write_mode=liquid_refrigerant_property_write_mode,
         refrigerant_polynomial_degree=refrigerant_polynomial_degree,
+        refrigerant_phase_mode=refrigerant_phase_mode,
     )
 
 

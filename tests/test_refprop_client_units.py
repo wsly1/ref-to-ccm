@@ -127,6 +127,33 @@ class _LegacyPqRefprop:
         raise AssertionError(f"unexpected composition: {composition}")
 
 
+class _TpFlashRefprop:
+    def __init__(self) -> None:
+        self.therm_called = False
+
+    def TPFLSHdll(self, temperature_k, pressure_kpa, z):
+        assert temperature_k == 320.0
+        assert pressure_kpa == 800.0
+        assert z == [1.0]
+        return SimpleNamespace(ierr=0, herr="", D=2.0, h=120.0)
+
+    def WMOLdll(self, composition):
+        assert composition == [1.0]
+        return 100.0
+
+    def THERMdll(self, temperature_k, density_mol_l, composition):
+        self.therm_called = True
+        return SimpleNamespace(h=999.0, Cp=200.0)
+
+    def TRNPRPdll(self, temperature_k, density_mol_l, composition):
+        return SimpleNamespace(ierr=0, herr="", eta=15.0, tcx=0.08)
+
+
+class _TpFlashWithoutEnthalpyRefprop:
+    def TPFLSHdll(self, temperature_k, pressure_kpa, z):
+        return SimpleNamespace(ierr=0, herr="", D=2.0)
+
+
 def test_refprop_pq_outputs_uses_mass_base_si_when_available() -> None:
     rp = _MassBaseSiRefprop()
     client = _client_for(rp)
@@ -178,3 +205,24 @@ def test_refprop_pq_outputs_falls_back_to_legacy_pqflsh_when_refpropdll_is_missi
     )
     assert rp.pq_calls == [{"pressure_kpa": 800.0, "quality": 0.0, "z": [1.0], "kq": 1}]
     assert rp.transport_calls == [{"temperature_k": 300.0, "density_mol_l": 10.0, "composition": [0.25, 0.75]}]
+
+
+def test_enthalpy_tp_uses_flash_enthalpy_instead_of_recalculating_td_state() -> None:
+    rp = _TpFlashRefprop()
+    client = _client_for(rp)
+
+    enthalpy = client.enthalpy_tp("R454C", 800_000.0, 320.0)
+
+    assert enthalpy == pytest.approx(1_200.0)
+    assert rp.therm_called is False
+
+
+def test_enthalpy_tp_falls_back_when_legacy_flash_has_no_enthalpy_field() -> None:
+    client = _client_for(_TpFlashWithoutEnthalpyRefprop())
+    client._properties_td = lambda temperature_k, density_mol_l, composition: {
+        "enthalpy": 4_321.0
+    }
+
+    enthalpy = client.enthalpy_tp("R454C", 800_000.0, 320.0)
+
+    assert enthalpy == pytest.approx(4_321.0)

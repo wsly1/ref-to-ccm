@@ -114,7 +114,7 @@ def load_refrigerant_inlet_from_xlsx(path: str | Path) -> RefrigerantInletCondit
     quality = _read_number_cell(root, "B31")
     vapor_fraction = _read_number_cell(root, "D31")
     liquid_fraction = 1.0 - vapor_fraction
-    return RefrigerantInletCondition(
+    condition = RefrigerantInletCondition(
         total_mass_flow_kg_s=total_mass_flow,
         single_layer_mass_flow_kg_s=single_layer_mass_flow,
         inlet_temperature_c=inlet_temperature,
@@ -125,6 +125,39 @@ def load_refrigerant_inlet_from_xlsx(path: str | Path) -> RefrigerantInletCondit
         heat_transfer_w=heat_transfer,
         outlet_temperature_c=outlet_temperature,
     )
+    return validate_refrigerant_inlet_condition(condition)
+
+
+def validate_refrigerant_inlet_condition(
+    condition: RefrigerantInletCondition,
+) -> RefrigerantInletCondition:
+    vapor_fraction = _require_finite(
+        "refrigerant_vapor_volume_fraction",
+        condition.vapor_volume_fraction,
+    )
+    if not 0.0 <= vapor_fraction <= 1.0:
+        raise ValueError(
+            "制冷剂气体体积分数必须在0到1之间，"
+            f"当前值为{vapor_fraction:.12g}；程序未自动修正。"
+        )
+
+    liquid_fraction = _require_finite(
+        "refrigerant_liquid_volume_fraction",
+        condition.liquid_volume_fraction,
+    )
+    if not 0.0 <= liquid_fraction <= 1.0:
+        raise ValueError(
+            "制冷剂液体体积分数必须在0到1之间，"
+            f"当前值为{liquid_fraction:.12g}；程序未自动修正。"
+        )
+    if not math.isclose(
+        vapor_fraction + liquid_fraction,
+        1.0,
+        rel_tol=0.0,
+        abs_tol=1.0e-9,
+    ):
+        raise ValueError("制冷剂气体和液体体积分数之和必须等于1。")
+    return condition
 
 
 def calculate_refrigerant_inlet(
@@ -141,6 +174,7 @@ def calculate_refrigerant_inlet(
     saturated_vapor_enthalpy_j_per_kg: float,
     saturated_liquid_density_kg_per_m3: float,
     saturated_vapor_density_kg_per_m3: float,
+    outlet_enthalpy_direction: str = "",
 ) -> RefrigerantInletCondition:
     inlet_temperature = _require_finite("inlet_temperature_c", inlet_temperature_c)
     outlet_temperature = _require_finite("outlet_temperature_c", outlet_temperature_c)
@@ -204,7 +238,7 @@ def calculate_refrigerant_inlet(
     )
     liquid_volume_fraction = 1.0 - vapor_volume_fraction
 
-    return RefrigerantInletCondition(
+    condition = RefrigerantInletCondition(
         total_mass_flow_kg_s=total_mass_flow,
         single_layer_mass_flow_kg_s=single_layer_mass_flow,
         inlet_temperature_c=inlet_temperature,
@@ -220,7 +254,9 @@ def calculate_refrigerant_inlet(
         outlet_temperature_c=outlet_temperature,
         inlet_enthalpy_j_per_kg=inlet_enthalpy,
         outlet_enthalpy_j_per_kg=outlet_enthalpy,
+        outlet_enthalpy_direction=outlet_enthalpy_direction,
     )
+    return validate_refrigerant_inlet_condition(condition)
 
 
 def _read_number_cell(root: ElementTree.Element, cell_ref: str) -> float:

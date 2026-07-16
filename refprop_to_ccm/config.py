@@ -38,6 +38,7 @@ class ToolConfig:
     refrigerant_property_write_mode: str = "table"
     liquid_refrigerant_property_write_mode: str | None = None
     refrigerant_polynomial_degree: int = 4
+    refrigerant_phase_mode: str = "multiphase"
     gas_table_mode: str = "temperature"
     quality_points: int | None = None
     viscosity_model: str = "cicchitti"
@@ -107,6 +108,7 @@ class ToolConfig:
                 self.liquid_refrigerant_property_write_mode or self.refrigerant_property_write_mode
             ),
             "refrigerant_polynomial_degree": str(self.refrigerant_polynomial_degree),
+            "refrigerant_phase_mode": self.refrigerant_phase_mode,
             "liquid_property_mode": self.liquid_property_mode,
             "gas_table_mode": self.gas_table_mode,
             "gas_quality_points": str(self.quality_points) if self.quality_points is not None else "auto",
