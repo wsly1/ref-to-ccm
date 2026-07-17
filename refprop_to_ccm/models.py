@@ -20,6 +20,16 @@ class SaturationState:
 
 
 @dataclass(frozen=True)
+class SaturatedMixtureState:
+    temperature_k: float
+    pressure_pa: float
+    mass_quality: float
+    enthalpy_j_per_kg: float
+    liquid_density_kg_per_m3: float
+    vapor_density_kg_per_m3: float
+
+
+@dataclass(frozen=True)
 class LiquidProperties:
     saturation_temperature_k: float
     saturation_pressure_pa: float

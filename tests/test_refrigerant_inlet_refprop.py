@@ -9,13 +9,20 @@ from refprop_to_ccm.core import (
     RefrigerantInletRefpropRequest,
     calculate_refrigerant_inlet_from_refprop,
 )
-from refprop_to_ccm.gui import RefpropToCcmApp
+from refprop_to_ccm.gui import RefpropToCcmApp, format_inlet_parameter_summary
 from refprop_to_ccm.inlet_conditions import (
     RefrigerantInletCondition,
     load_refrigerant_inlet_from_xlsx,
+    normalize_refrigerant_inlet_volume_fraction,
     validate_refrigerant_inlet_condition,
 )
-from refprop_to_ccm.models import CoolantCalculation, CoolantRow, LiquidProperties, SaturationState
+from refprop_to_ccm.models import (
+    CoolantCalculation,
+    CoolantRow,
+    LiquidProperties,
+    SaturatedMixtureState,
+    SaturationState,
+)
 from refprop_to_ccm.star_apply import StarApplyConfig, render_refrigerant_inlet_condition_macro
 from refprop_to_ccm.tables import write_coolant_xlsx
 
@@ -70,6 +77,28 @@ class FakeRefpropClient:
             return 400_000.0
         raise AssertionError(f"unexpected temperature: {temperature_k}")
 
+    def temperature_ph(self, fluid_name: str, pressure_pa: float, enthalpy_j_per_kg: float) -> float:
+        assert fluid_name == "R454C"
+        assert pressure_pa == pytest.approx(800_000.0)
+        return 313.15
+
+    def saturated_mixture_state_from_quality(
+        self,
+        fluid_name: str,
+        pressure_pa: float,
+        quality: float,
+    ) -> SaturatedMixtureState:
+        assert fluid_name == "R454C"
+        assert pressure_pa == pytest.approx(800_000.0)
+        return SaturatedMixtureState(
+            temperature_k=313.15,
+            pressure_pa=pressure_pa,
+            mass_quality=quality,
+            enthalpy_j_per_kg=200_000.0 + quality * 400_000.0,
+            liquid_density_kg_per_m3=1_000.0,
+            vapor_density_kg_per_m3=10.0,
+        )
+
 
 def test_calculate_refrigerant_inlet_queries_refprop_after_entry_inputs() -> None:
     refprop = FakeRefpropClient()
@@ -100,6 +129,181 @@ def test_calculate_refrigerant_inlet_queries_refprop_after_entry_inputs() -> Non
     assert result.condition.heat_transfer_w == pytest.approx(10_000.0)
     assert result.saturation.pressure_pa == pytest.approx(800_000.0)
     assert result.liquid == _liquid_properties()
+
+
+@pytest.mark.parametrize(
+    ("inlet_state_mode", "input_value", "expected_quality", "expected_enthalpy"),
+    [
+        ("enthalpy", 350_000.0, 0.375, 350_000.0),
+        ("quality", 0.25, 0.25, 300_000.0),
+        (
+            "vapor_volume_fraction",
+            0.8,
+            0.8 * 10.0 / (0.8 * 10.0 + 0.2 * 1_000.0),
+            200_000.0
+            + (0.8 * 10.0 / (0.8 * 10.0 + 0.2 * 1_000.0)) * 400_000.0,
+        ),
+    ],
+)
+def test_calculate_refrigerant_inlet_supports_three_two_phase_input_modes(
+    inlet_state_mode: str,
+    input_value: float,
+    expected_quality: float,
+    expected_enthalpy: float,
+) -> None:
+    request_kwargs = {
+        "inlet_enthalpy_j_per_kg": None,
+        "inlet_quality": None,
+        "inlet_vapor_volume_fraction": None,
+    }
+    request_kwargs[
+        {
+            "enthalpy": "inlet_enthalpy_j_per_kg",
+            "quality": "inlet_quality",
+            "vapor_volume_fraction": "inlet_vapor_volume_fraction",
+        }[inlet_state_mode]
+    ] = input_value
+    request = RefrigerantInletRefpropRequest(
+        fluid_name="R454C",
+        fluid_components=None,
+        saturation_type="pressure",
+        saturation_value=0.8,
+        saturation_unit="MPa",
+        solve_mode="heat_transfer",
+        heat_transfer_w=10_000.0,
+        total_mass_flow_kg_s=None,
+        layer_count=10,
+        inlet_temperature_c=None,
+        outlet_temperature_c=60.0,
+        outlet_enthalpy_direction=None,
+        inlet_state_mode=inlet_state_mode,
+        **request_kwargs,
+    )
+
+    result = calculate_refrigerant_inlet_from_refprop(
+        request,
+        refprop=FakeRefpropClient(),
+    )
+
+    assert result.condition.quality == pytest.approx(expected_quality, abs=1.0e-8)
+    assert result.condition.inlet_enthalpy_j_per_kg == pytest.approx(expected_enthalpy, abs=1.0e-4)
+    assert result.condition.inlet_temperature_c == pytest.approx(40.0)
+    assert result.condition.saturated_liquid_density_kg_per_m3 == pytest.approx(1_000.0)
+    assert result.condition.saturated_vapor_density_kg_per_m3 == pytest.approx(10.0)
+
+
+def test_out_of_range_calculated_volume_fraction_requires_explicit_normalization() -> None:
+    request = RefrigerantInletRefpropRequest(
+        fluid_name="R454C",
+        fluid_components=None,
+        saturation_type="pressure",
+        saturation_value=0.8,
+        saturation_unit="MPa",
+        solve_mode="heat_transfer",
+        heat_transfer_w=10_000.0,
+        total_mass_flow_kg_s=None,
+        layer_count=10,
+        inlet_temperature_c=None,
+        outlet_temperature_c=60.0,
+        outlet_enthalpy_direction=None,
+        inlet_state_mode="enthalpy",
+        inlet_enthalpy_j_per_kg=-40_000.0,
+    )
+
+    result = calculate_refrigerant_inlet_from_refprop(
+        request,
+        refprop=FakeRefpropClient(),
+        allow_out_of_range_volume_fraction=True,
+    )
+
+    assert result.condition.quality == pytest.approx(-0.6)
+    assert result.condition.vapor_volume_fraction == pytest.approx(-0.6)
+    normalized = normalize_refrigerant_inlet_volume_fraction(result.condition)
+    assert normalized.calculated_vapor_volume_fraction == pytest.approx(-0.6)
+    assert normalized.vapor_volume_fraction == 0.0
+    assert normalized.liquid_volume_fraction == 1.0
+
+
+def test_direct_volume_fraction_above_one_can_only_be_normalized_to_vapor() -> None:
+    request = RefrigerantInletRefpropRequest(
+        fluid_name="R454C",
+        fluid_components=None,
+        saturation_type="pressure",
+        saturation_value=0.8,
+        saturation_unit="MPa",
+        solve_mode="heat_transfer",
+        heat_transfer_w=10_000.0,
+        total_mass_flow_kg_s=None,
+        layer_count=10,
+        inlet_temperature_c=None,
+        outlet_temperature_c=60.0,
+        outlet_enthalpy_direction=None,
+        inlet_state_mode="vapor_volume_fraction",
+        inlet_vapor_volume_fraction=1.4,
+    )
+
+    result = calculate_refrigerant_inlet_from_refprop(
+        request,
+        refprop=FakeRefpropClient(),
+        allow_out_of_range_volume_fraction=True,
+    )
+    normalized = normalize_refrigerant_inlet_volume_fraction(result.condition)
+
+    assert normalized.calculated_vapor_volume_fraction == pytest.approx(1.4)
+    assert normalized.vapor_volume_fraction == 1.0
+    assert normalized.liquid_volume_fraction == 0.0
+
+
+def test_inlet_parameter_summary_only_contains_physical_inlet_values() -> None:
+    result = calculate_refrigerant_inlet_from_refprop(
+        RefrigerantInletRefpropRequest(
+            fluid_name="R454C",
+            fluid_components=None,
+            saturation_type="pressure",
+            saturation_value=0.8,
+            saturation_unit="MPa",
+            solve_mode="heat_transfer",
+            heat_transfer_w=10_000.0,
+            total_mass_flow_kg_s=None,
+            layer_count=10,
+            inlet_temperature_c=None,
+            outlet_temperature_c=60.0,
+            outlet_enthalpy_direction=None,
+            inlet_state_mode="quality",
+            inlet_quality=0.25,
+        ),
+        refprop=FakeRefpropClient(),
+    )
+
+    summary = format_inlet_parameter_summary(
+        coolant_values=SimpleNamespace(
+            inlet_temperature_c=42.0,
+            outlet_temperature_c=66.5,
+            volume_flow_l_min=25.0,
+            mass_flow_kg_s=0.4375,
+            single_plate_mass_flow_kg_s=0.013671875,
+            heat_transfer_w=38_587.5,
+        ),
+        refrigerant_result=result,
+    )
+
+    for expected in (
+        "入口温度",
+        "出口温度",
+        "体积流量",
+        "单板质量流量",
+        "饱和压力",
+        "入口焓值",
+        "出口焓值",
+        "干度",
+        "饱和液体密度",
+        "饱和气体密度",
+        "气体体积分数",
+    ):
+        assert expected in summary
+    assert "STAR-CCM+" not in summary
+    assert "连续体" not in summary
+    assert "宏输出" not in summary
 
 
 @pytest.mark.parametrize("vapor_fraction", [-0.01, 1.01])

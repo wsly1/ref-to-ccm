@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from .models import LiquidProperties, LiquidRow, SaturationState, VaporRow
+from .models import LiquidProperties, LiquidRow, SaturatedMixtureState, SaturationState, VaporRow
 from .units import k_to_c
 
 ALLOWED_REFPROP_WARNINGS = {-319, -320, -113}
@@ -15,7 +15,7 @@ MAX_ABS_SPECIFIC_ENTROPY_J_PER_KG_K = 1.0e7
 _REFPROP_UNIT_MASS_BASE_SI = "mass_base_si"
 _REFPROP_UNIT_MASS_SI = "mass_si"
 _LEGACY_REFPROP_MASS_SI = 2
-_REFPROP_PQ_MOLE_QUALITY = 1
+_REFPROP_PQ_MASS_QUALITY = 2
 _MISSING_REFPROPDLL_FRAGMENT = "REFPROPdll could not be loaded"
 _MASS_SI_OUTPUT_SCALE = {
     "E": 1000.0,
@@ -150,6 +150,29 @@ class RefpropClient:
             f"calculating temperature for {fluid_name} at P={pressure_pa} Pa, H={enthalpy_j_per_kg} J/kg",
         )
         return flash.T
+
+    def saturated_mixture_state_from_quality(
+        self,
+        fluid_name: str,
+        pressure_pa: float,
+        quality: float,
+    ) -> SaturatedMixtureState:
+        mass_quality = float(quality)
+        if not math.isfinite(mass_quality) or not 0.0 <= mass_quality <= 1.0:
+            raise ValueError("Mass quality must be a finite value between 0 and 1.")
+        temperature_k, enthalpy, liquid_density, vapor_density = self._refprop_pq_outputs(
+            pressure_pa,
+            mass_quality,
+            "T;H;DLIQ;DVAP",
+        )
+        return SaturatedMixtureState(
+            temperature_k=temperature_k,
+            pressure_pa=pressure_pa,
+            mass_quality=mass_quality,
+            enthalpy_j_per_kg=enthalpy,
+            liquid_density_kg_per_m3=liquid_density,
+            vapor_density_kg_per_m3=vapor_density,
+        )
 
     def vapor_table(
         self,
@@ -396,7 +419,7 @@ class RefpropClient:
         try:
             result = self.rp.REFPROPdll(
                 self.loaded_fluid,
-                "PQ",
+                "PQMASS",
                 outputs,
                 unit_code,
                 0,
@@ -418,7 +441,7 @@ class RefpropClient:
         return _validate_pq_output_values(pressure_pa, quality, outputs, output_names, values)
 
     def _refprop_pq_outputs_legacy(self, pressure_pa: float, quality: float, outputs: str) -> tuple[float, ...]:
-        state = self.rp.PQFLSHdll(pressure_pa / 1000.0, quality, self.z, _REFPROP_PQ_MOLE_QUALITY)
+        state = self.rp.PQFLSHdll(pressure_pa / 1000.0, quality, self.z, _REFPROP_PQ_MASS_QUALITY)
         self._check(state.ierr, state.herr, f"calculating legacy PQ state ({outputs}) at P={pressure_pa} Pa, Q={quality}")
 
         output_names = [output_name.strip().upper() for output_name in outputs.split(";")]

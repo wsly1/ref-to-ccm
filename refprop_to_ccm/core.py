@@ -8,8 +8,12 @@ from pathlib import Path
 from typing import Any
 
 from .config import ToolConfig
-from .inlet_conditions import RefrigerantInletCondition, calculate_refrigerant_inlet
-from .models import LiquidProperties, SaturationState
+from .inlet_conditions import (
+    RefrigerantInletCondition,
+    calculate_refrigerant_inlet,
+    vapor_volume_fraction_from_quality,
+)
+from .models import LiquidProperties, SaturatedMixtureState, SaturationState
 from .refprop_client import RefpropClient
 from .refprop_client import TEMPERATURE_EPSILON
 from .starccm import StarCcmRunner, render_macro
@@ -45,9 +49,13 @@ class RefrigerantInletRefpropRequest:
     heat_transfer_w: float | None
     total_mass_flow_kg_s: float | None
     layer_count: int
-    inlet_temperature_c: float
+    inlet_temperature_c: float | None
     outlet_temperature_c: float | None
     outlet_enthalpy_direction: str | None
+    inlet_state_mode: str = "temperature"
+    inlet_enthalpy_j_per_kg: float | None = None
+    inlet_quality: float | None = None
+    inlet_vapor_volume_fraction: float | None = None
 
 
 @dataclass(frozen=True)
@@ -57,10 +65,24 @@ class RefrigerantInletRefpropResult:
     liquid: LiquidProperties
 
 
+@dataclass(frozen=True)
+class _ResolvedRefrigerantInletState:
+    temperature_c: float
+    enthalpy_j_per_kg: float
+    quality: float | None
+    vapor_volume_fraction: float | None
+    saturated_liquid_enthalpy_j_per_kg: float
+    saturated_vapor_enthalpy_j_per_kg: float
+    liquid_density_kg_per_m3: float
+    vapor_density_kg_per_m3: float
+    state_mode: str
+
+
 def calculate_refrigerant_inlet_from_refprop(
     request: RefrigerantInletRefpropRequest,
     *,
     refprop=None,
+    allow_out_of_range_volume_fraction: bool = False,
 ) -> RefrigerantInletRefpropResult:
     client = refprop if refprop is not None else RefpropClient()
     client.load_fluid(request.fluid_name, request.fluid_components)
@@ -84,7 +106,9 @@ def calculate_refrigerant_inlet_from_refprop(
         request=request,
         refprop=client,
         saturation_pressure_pa=saturation.pressure_pa,
+        saturation_temperature_k=saturation.temperature_k,
         liquid=liquid,
+        allow_out_of_range_volume_fraction=allow_out_of_range_volume_fraction,
     )
     return RefrigerantInletRefpropResult(
         condition=condition,
@@ -275,6 +299,7 @@ def build_refrigerant_inlet_condition_summary(
         request=request,
         refprop=refprop,
         saturation_pressure_pa=saturation_pressure_pa,
+        saturation_temperature_k=saturation_temperature_k,
         liquid=liquid,
     )
     return asdict(refrigerant_inlet)
@@ -285,18 +310,21 @@ def _calculate_refrigerant_inlet_condition(
     request: RefrigerantInletRefpropRequest,
     refprop,
     saturation_pressure_pa: float,
+    saturation_temperature_k: float,
     liquid: LiquidProperties,
+    allow_out_of_range_volume_fraction: bool = False,
 ) -> RefrigerantInletCondition:
     solve_mode = request.solve_mode.strip().lower()
     if solve_mode not in {"heat_transfer", "mass_flow", "outlet_temperature"}:
         raise ValueError("solve_mode must be heat_transfer, mass_flow, or outlet_temperature.")
 
-    inlet_temperature_k = temperature_to_k(request.inlet_temperature_c, "C")
-    inlet_enthalpy_j_per_kg = refprop.enthalpy_tp(
-        request.fluid_name,
-        saturation_pressure_pa,
-        inlet_temperature_k,
+    inlet_state = _resolve_refrigerant_inlet_state(
+        request=request,
+        refprop=refprop,
+        saturation_pressure_pa=saturation_pressure_pa,
+        liquid=liquid,
     )
+    inlet_enthalpy_j_per_kg = inlet_state.enthalpy_j_per_kg
     outlet_enthalpy_direction = ""
     if solve_mode == "outlet_temperature":
         outlet_enthalpy_direction = str(request.outlet_enthalpy_direction or "").strip().lower()
@@ -333,16 +361,286 @@ def _calculate_refrigerant_inlet_condition(
         heat_transfer_w=request.heat_transfer_w,
         total_mass_flow_kg_s=request.total_mass_flow_kg_s,
         layer_count=request.layer_count,
-        inlet_temperature_c=request.inlet_temperature_c,
+        inlet_temperature_c=inlet_state.temperature_c,
         outlet_temperature_c=outlet_temperature_c,
         inlet_enthalpy_j_per_kg=inlet_enthalpy_j_per_kg,
         outlet_enthalpy_j_per_kg=outlet_enthalpy_j_per_kg,
-        saturated_liquid_enthalpy_j_per_kg=liquid.saturated_liquid_enthalpy_j_per_kg,
-        saturated_vapor_enthalpy_j_per_kg=liquid.saturated_vapor_enthalpy_j_per_kg,
-        saturated_liquid_density_kg_per_m3=liquid.density_kg_per_m3,
-        saturated_vapor_density_kg_per_m3=liquid.saturated_vapor_density_kg_per_m3,
+        saturated_liquid_enthalpy_j_per_kg=inlet_state.saturated_liquid_enthalpy_j_per_kg,
+        saturated_vapor_enthalpy_j_per_kg=inlet_state.saturated_vapor_enthalpy_j_per_kg,
+        saturated_liquid_density_kg_per_m3=inlet_state.liquid_density_kg_per_m3,
+        saturated_vapor_density_kg_per_m3=inlet_state.vapor_density_kg_per_m3,
         outlet_enthalpy_direction=outlet_enthalpy_direction,
+        fluid_name=request.fluid_name,
+        inlet_state_mode=inlet_state.state_mode,
+        saturation_pressure_pa=saturation_pressure_pa,
+        saturation_temperature_c=k_to_c(saturation_temperature_k),
+        inlet_quality=inlet_state.quality,
+        inlet_vapor_volume_fraction=inlet_state.vapor_volume_fraction,
+        allow_out_of_range_volume_fraction=allow_out_of_range_volume_fraction,
     )
+
+
+def _resolve_refrigerant_inlet_state(
+    *,
+    request: RefrigerantInletRefpropRequest,
+    refprop,
+    saturation_pressure_pa: float,
+    liquid: LiquidProperties,
+) -> _ResolvedRefrigerantInletState:
+    state_mode = str(request.inlet_state_mode or "temperature").strip().lower()
+    if state_mode == "temperature":
+        inlet_temperature_c = _required_finite(
+            request.inlet_temperature_c,
+            "inlet_temperature_c",
+        )
+        inlet_enthalpy = refprop.enthalpy_tp(
+            request.fluid_name,
+            saturation_pressure_pa,
+            temperature_to_k(inlet_temperature_c, "C"),
+        )
+        return _ResolvedRefrigerantInletState(
+            temperature_c=inlet_temperature_c,
+            enthalpy_j_per_kg=inlet_enthalpy,
+            quality=None,
+            vapor_volume_fraction=None,
+            saturated_liquid_enthalpy_j_per_kg=liquid.saturated_liquid_enthalpy_j_per_kg,
+            saturated_vapor_enthalpy_j_per_kg=liquid.saturated_vapor_enthalpy_j_per_kg,
+            liquid_density_kg_per_m3=liquid.density_kg_per_m3,
+            vapor_density_kg_per_m3=liquid.saturated_vapor_density_kg_per_m3,
+            state_mode=state_mode,
+        )
+
+    if state_mode not in {"enthalpy", "quality", "vapor_volume_fraction"}:
+        raise ValueError(
+            "inlet_state_mode must be temperature, enthalpy, quality, or vapor_volume_fraction."
+        )
+
+    saturated_liquid = refprop.saturated_mixture_state_from_quality(
+        request.fluid_name,
+        saturation_pressure_pa,
+        0.0,
+    )
+    saturated_vapor = refprop.saturated_mixture_state_from_quality(
+        request.fluid_name,
+        saturation_pressure_pa,
+        1.0,
+    )
+    if saturated_vapor.enthalpy_j_per_kg <= saturated_liquid.enthalpy_j_per_kg:
+        raise ValueError("REFPROP返回的饱和气体焓值必须大于饱和液体焓值。")
+
+    if state_mode == "enthalpy":
+        inlet_enthalpy = _required_finite(
+            request.inlet_enthalpy_j_per_kg,
+            "inlet_enthalpy_j_per_kg",
+        )
+        state, quality, inlet_temperature_c = _state_from_inlet_enthalpy(
+            refprop=refprop,
+            fluid_name=request.fluid_name,
+            pressure_pa=saturation_pressure_pa,
+            enthalpy_j_per_kg=inlet_enthalpy,
+            saturated_liquid=saturated_liquid,
+            saturated_vapor=saturated_vapor,
+        )
+        vapor_fraction = vapor_volume_fraction_from_quality(
+            quality=quality,
+            liquid_density_kg_per_m3=state.liquid_density_kg_per_m3,
+            vapor_density_kg_per_m3=state.vapor_density_kg_per_m3,
+        )
+    elif state_mode == "quality":
+        quality = _required_finite(request.inlet_quality, "inlet_quality")
+        state = _state_for_possibly_unbounded_quality(
+            refprop=refprop,
+            fluid_name=request.fluid_name,
+            pressure_pa=saturation_pressure_pa,
+            quality=quality,
+            saturated_liquid=saturated_liquid,
+            saturated_vapor=saturated_vapor,
+        )
+        inlet_enthalpy = state.enthalpy_j_per_kg
+        inlet_temperature_c = k_to_c(state.temperature_k)
+        vapor_fraction = vapor_volume_fraction_from_quality(
+            quality=quality,
+            liquid_density_kg_per_m3=state.liquid_density_kg_per_m3,
+            vapor_density_kg_per_m3=state.vapor_density_kg_per_m3,
+        )
+    else:
+        vapor_fraction = _required_finite(
+            request.inlet_vapor_volume_fraction,
+            "inlet_vapor_volume_fraction",
+        )
+        state, quality = _state_from_vapor_volume_fraction(
+            refprop=refprop,
+            fluid_name=request.fluid_name,
+            pressure_pa=saturation_pressure_pa,
+            vapor_volume_fraction=vapor_fraction,
+            saturated_liquid=saturated_liquid,
+            saturated_vapor=saturated_vapor,
+        )
+        inlet_enthalpy = state.enthalpy_j_per_kg
+        inlet_temperature_c = k_to_c(state.temperature_k)
+
+    return _ResolvedRefrigerantInletState(
+        temperature_c=inlet_temperature_c,
+        enthalpy_j_per_kg=inlet_enthalpy,
+        quality=quality,
+        vapor_volume_fraction=vapor_fraction,
+        saturated_liquid_enthalpy_j_per_kg=saturated_liquid.enthalpy_j_per_kg,
+        saturated_vapor_enthalpy_j_per_kg=saturated_vapor.enthalpy_j_per_kg,
+        liquid_density_kg_per_m3=state.liquid_density_kg_per_m3,
+        vapor_density_kg_per_m3=state.vapor_density_kg_per_m3,
+        state_mode=state_mode,
+    )
+
+
+def _state_from_inlet_enthalpy(
+    *,
+    refprop,
+    fluid_name: str,
+    pressure_pa: float,
+    enthalpy_j_per_kg: float,
+    saturated_liquid: SaturatedMixtureState,
+    saturated_vapor: SaturatedMixtureState,
+) -> tuple[SaturatedMixtureState, float, float]:
+    liquid_enthalpy = saturated_liquid.enthalpy_j_per_kg
+    vapor_enthalpy = saturated_vapor.enthalpy_j_per_kg
+    quality = (enthalpy_j_per_kg - liquid_enthalpy) / (vapor_enthalpy - liquid_enthalpy)
+    if quality < 0.0 or quality > 1.0:
+        boundary_state = saturated_liquid if quality < 0.0 else saturated_vapor
+        temperature_k = refprop.temperature_ph(
+            fluid_name,
+            pressure_pa,
+            enthalpy_j_per_kg,
+        )
+        state = SaturatedMixtureState(
+            temperature_k=temperature_k,
+            pressure_pa=pressure_pa,
+            mass_quality=quality,
+            enthalpy_j_per_kg=enthalpy_j_per_kg,
+            liquid_density_kg_per_m3=boundary_state.liquid_density_kg_per_m3,
+            vapor_density_kg_per_m3=boundary_state.vapor_density_kg_per_m3,
+        )
+        return state, quality, k_to_c(temperature_k)
+
+    state = _bisect_saturated_state(
+        refprop=refprop,
+        fluid_name=fluid_name,
+        pressure_pa=pressure_pa,
+        target=enthalpy_j_per_kg,
+        value_from_state=lambda candidate: candidate.enthalpy_j_per_kg,
+        saturated_liquid=saturated_liquid,
+        saturated_vapor=saturated_vapor,
+    )
+    return state, state.mass_quality, k_to_c(state.temperature_k)
+
+
+def _state_for_possibly_unbounded_quality(
+    *,
+    refprop,
+    fluid_name: str,
+    pressure_pa: float,
+    quality: float,
+    saturated_liquid: SaturatedMixtureState,
+    saturated_vapor: SaturatedMixtureState,
+) -> SaturatedMixtureState:
+    if 0.0 <= quality <= 1.0:
+        return refprop.saturated_mixture_state_from_quality(
+            fluid_name,
+            pressure_pa,
+            quality,
+        )
+    liquid_enthalpy = saturated_liquid.enthalpy_j_per_kg
+    vapor_enthalpy = saturated_vapor.enthalpy_j_per_kg
+    enthalpy = liquid_enthalpy + quality * (vapor_enthalpy - liquid_enthalpy)
+    boundary_state = saturated_liquid if quality < 0.0 else saturated_vapor
+    temperature_k = refprop.temperature_ph(fluid_name, pressure_pa, enthalpy)
+    return SaturatedMixtureState(
+        temperature_k=temperature_k,
+        pressure_pa=pressure_pa,
+        mass_quality=quality,
+        enthalpy_j_per_kg=enthalpy,
+        liquid_density_kg_per_m3=boundary_state.liquid_density_kg_per_m3,
+        vapor_density_kg_per_m3=boundary_state.vapor_density_kg_per_m3,
+    )
+
+
+def _state_from_vapor_volume_fraction(
+    *,
+    refprop,
+    fluid_name: str,
+    pressure_pa: float,
+    vapor_volume_fraction: float,
+    saturated_liquid: SaturatedMixtureState,
+    saturated_vapor: SaturatedMixtureState,
+) -> tuple[SaturatedMixtureState, float]:
+    if vapor_volume_fraction < 0.0:
+        return saturated_liquid, 0.0
+    if vapor_volume_fraction > 1.0:
+        return saturated_vapor, 1.0
+    if vapor_volume_fraction == 0.0:
+        return saturated_liquid, 0.0
+    if vapor_volume_fraction == 1.0:
+        return saturated_vapor, 1.0
+    state = _bisect_saturated_state(
+        refprop=refprop,
+        fluid_name=fluid_name,
+        pressure_pa=pressure_pa,
+        target=vapor_volume_fraction,
+        value_from_state=lambda candidate: vapor_volume_fraction_from_quality(
+            quality=candidate.mass_quality,
+            liquid_density_kg_per_m3=candidate.liquid_density_kg_per_m3,
+            vapor_density_kg_per_m3=candidate.vapor_density_kg_per_m3,
+        ),
+        saturated_liquid=saturated_liquid,
+        saturated_vapor=saturated_vapor,
+    )
+    return state, state.mass_quality
+
+
+def _bisect_saturated_state(
+    *,
+    refprop,
+    fluid_name: str,
+    pressure_pa: float,
+    target: float,
+    value_from_state,
+    saturated_liquid: SaturatedMixtureState,
+    saturated_vapor: SaturatedMixtureState,
+) -> SaturatedMixtureState:
+    low_state = saturated_liquid
+    high_state = saturated_vapor
+    low_value = value_from_state(low_state)
+    high_value = value_from_state(high_state)
+    if target <= low_value:
+        return low_state
+    if target >= high_value:
+        return high_state
+
+    best_state = low_state
+    for _ in range(60):
+        quality = (low_state.mass_quality + high_state.mass_quality) / 2.0
+        candidate = refprop.saturated_mixture_state_from_quality(
+            fluid_name,
+            pressure_pa,
+            quality,
+        )
+        candidate_value = value_from_state(candidate)
+        best_state = candidate
+        if math.isclose(candidate_value, target, rel_tol=1.0e-10, abs_tol=1.0e-10):
+            break
+        if candidate_value < target:
+            low_state = candidate
+        else:
+            high_state = candidate
+    return best_state
+
+
+def _required_finite(value: float | None, name: str) -> float:
+    if value is None:
+        raise ValueError(f"{name} is required for the selected inlet state mode.")
+    numeric = float(value)
+    if not math.isfinite(numeric):
+        raise ValueError(f"{name} must be finite.")
+    return numeric
 
 
 def validate_gas_temperature_range(config: ToolConfig, saturation_temperature_k: float) -> None:

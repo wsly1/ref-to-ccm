@@ -161,6 +161,7 @@ def test_refprop_pq_outputs_uses_mass_base_si_when_available() -> None:
     values = client._refprop_pq_outputs(800000.0, 0.5, "T;H;VIS")
 
     assert values == pytest.approx((300.0, 120000.0, 2.5e-5))
+    assert rp.calls[0]["inputs"] == "PQMASS"
     assert rp.calls[0]["units"] == 21
     assert rp.calls[0]["prop1"] == 800000.0
     assert rp.calls[0]["prop2"] == 0.5
@@ -203,7 +204,7 @@ def test_refprop_pq_outputs_falls_back_to_legacy_pqflsh_when_refpropdll_is_missi
             15.0e-6,
         )
     )
-    assert rp.pq_calls == [{"pressure_kpa": 800.0, "quality": 0.0, "z": [1.0], "kq": 1}]
+    assert rp.pq_calls == [{"pressure_kpa": 800.0, "quality": 0.0, "z": [1.0], "kq": 2}]
     assert rp.transport_calls == [{"temperature_k": 300.0, "density_mol_l": 10.0, "composition": [0.25, 0.75]}]
 
 

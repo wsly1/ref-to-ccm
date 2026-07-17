@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 from pathlib import Path
 from xml.etree import ElementTree
@@ -47,6 +47,13 @@ class RefrigerantInletCondition:
     inlet_enthalpy_j_per_kg: float | None = None
     outlet_enthalpy_j_per_kg: float | None = None
     outlet_enthalpy_direction: str = ""
+    fluid_name: str = ""
+    inlet_state_mode: str = "temperature"
+    saturation_pressure_pa: float = 0.0
+    saturation_temperature_c: float = 0.0
+    saturated_liquid_density_kg_per_m3: float = 0.0
+    saturated_vapor_density_kg_per_m3: float = 0.0
+    calculated_vapor_volume_fraction: float | None = None
 
 
 RefrigerantInletCalculation = RefrigerantInletCondition
@@ -160,6 +167,33 @@ def validate_refrigerant_inlet_condition(
     return condition
 
 
+def normalize_refrigerant_inlet_volume_fraction(
+    condition: RefrigerantInletCondition,
+) -> RefrigerantInletCondition:
+    calculated_fraction = _require_finite(
+        "refrigerant_vapor_volume_fraction",
+        condition.vapor_volume_fraction,
+    )
+    if calculated_fraction < 0.0:
+        applied_fraction = 0.0
+    elif calculated_fraction > 1.0:
+        applied_fraction = 1.0
+    else:
+        return validate_refrigerant_inlet_condition(condition)
+    liquid_fraction = 1.0 - applied_fraction
+    normalized = replace(
+        condition,
+        vapor_volume_fraction=applied_fraction,
+        liquid_volume_fraction=liquid_fraction,
+        calculated_vapor_volume_fraction=calculated_fraction,
+        starccm_volume_fraction=describe_starccm_volume_fractions(
+            applied_fraction,
+            liquid_fraction,
+        ),
+    )
+    return validate_refrigerant_inlet_condition(normalized)
+
+
 def calculate_refrigerant_inlet(
     *,
     solve_mode: str = "heat_transfer",
@@ -175,6 +209,13 @@ def calculate_refrigerant_inlet(
     saturated_liquid_density_kg_per_m3: float,
     saturated_vapor_density_kg_per_m3: float,
     outlet_enthalpy_direction: str = "",
+    fluid_name: str = "",
+    inlet_state_mode: str = "temperature",
+    saturation_pressure_pa: float = 0.0,
+    saturation_temperature_c: float = 0.0,
+    inlet_quality: float | None = None,
+    inlet_vapor_volume_fraction: float | None = None,
+    allow_out_of_range_volume_fraction: bool = False,
 ) -> RefrigerantInletCondition:
     inlet_temperature = _require_finite("inlet_temperature_c", inlet_temperature_c)
     outlet_temperature = _require_finite("outlet_temperature_c", outlet_temperature_c)
@@ -230,11 +271,19 @@ def calculate_refrigerant_inlet(
             raise ValueError("total_mass_flow_kg_s must be greater than 0.")
 
     single_layer_mass_flow = total_mass_flow / float(layer_count)
-    quality = (inlet_enthalpy - saturated_liquid_enthalpy) / latent_enthalpy
-    vapor_volume_fraction = _vapor_volume_fraction(
-        quality=quality,
-        liquid_density_kg_per_m3=saturated_liquid_density,
-        vapor_density_kg_per_m3=saturated_vapor_density,
+    quality = (
+        _require_finite("inlet_quality", inlet_quality)
+        if inlet_quality is not None
+        else (inlet_enthalpy - saturated_liquid_enthalpy) / latent_enthalpy
+    )
+    vapor_volume_fraction = (
+        _require_finite("inlet_vapor_volume_fraction", inlet_vapor_volume_fraction)
+        if inlet_vapor_volume_fraction is not None
+        else vapor_volume_fraction_from_quality(
+            quality=quality,
+            liquid_density_kg_per_m3=saturated_liquid_density,
+            vapor_density_kg_per_m3=saturated_vapor_density,
+        )
     )
     liquid_volume_fraction = 1.0 - vapor_volume_fraction
 
@@ -255,7 +304,16 @@ def calculate_refrigerant_inlet(
         inlet_enthalpy_j_per_kg=inlet_enthalpy,
         outlet_enthalpy_j_per_kg=outlet_enthalpy,
         outlet_enthalpy_direction=outlet_enthalpy_direction,
+        fluid_name=fluid_name,
+        inlet_state_mode=inlet_state_mode,
+        saturation_pressure_pa=saturation_pressure_pa,
+        saturation_temperature_c=saturation_temperature_c,
+        saturated_liquid_density_kg_per_m3=saturated_liquid_density,
+        saturated_vapor_density_kg_per_m3=saturated_vapor_density,
+        calculated_vapor_volume_fraction=vapor_volume_fraction,
     )
+    if allow_out_of_range_volume_fraction:
+        return condition
     return validate_refrigerant_inlet_condition(condition)
 
 
@@ -272,25 +330,25 @@ def _read_number_cell(root: ElementTree.Element, cell_ref: str) -> float:
         raise ValueError(f"Coolant workbook cell {cell_ref} is not a valid numeric value.") from exc
 
 
-def _vapor_volume_fraction(
+def vapor_volume_fraction_from_quality(
     *,
     quality: float,
     liquid_density_kg_per_m3: float,
     vapor_density_kg_per_m3: float,
 ) -> float:
-    if quality <= 0.0:
-        return 0.0
-    if quality >= 1.0:
-        return 1.0
+    mass_quality = _require_finite("quality", quality)
+    if mass_quality < 0.0 or mass_quality > 1.0:
+        return mass_quality
 
     specific_volume_liquid = 1.0 / liquid_density_kg_per_m3
     specific_volume_vapor = 1.0 / vapor_density_kg_per_m3
     mixture_specific_volume = (
-        (1.0 - quality) * specific_volume_liquid + quality * specific_volume_vapor
+        (1.0 - mass_quality) * specific_volume_liquid
+        + mass_quality * specific_volume_vapor
     )
     if mixture_specific_volume <= _EPSILON:
         raise ValueError("Calculated mixture specific volume must be greater than 0.")
-    vapor_fraction = quality * specific_volume_vapor / mixture_specific_volume
+    vapor_fraction = mass_quality * specific_volume_vapor / mixture_specific_volume
     return min(max(vapor_fraction, 0.0), 1.0)
 
 
