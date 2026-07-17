@@ -154,6 +154,13 @@ class _TpFlashWithoutEnthalpyRefprop:
         return SimpleNamespace(ierr=0, herr="", D=2.0)
 
 
+class _TwoPhaseTpFlashRefprop(_TpFlashRefprop):
+    def TPFLSHdll(self, temperature_k, pressure_kpa, z):
+        flash = super().TPFLSHdll(temperature_k, pressure_kpa, z)
+        flash.q = 0.4
+        return flash
+
+
 def test_refprop_pq_outputs_uses_mass_base_si_when_available() -> None:
     rp = _MassBaseSiRefprop()
     client = _client_for(rp)
@@ -227,3 +234,10 @@ def test_enthalpy_tp_falls_back_when_legacy_flash_has_no_enthalpy_field() -> Non
     enthalpy = client.enthalpy_tp("R454C", 800_000.0, 320.0)
 
     assert enthalpy == pytest.approx(4_321.0)
+
+
+def test_enthalpy_tp_single_phase_rejects_two_phase_flash_quality() -> None:
+    client = _client_for(_TwoPhaseTpFlashRefprop())
+
+    with pytest.raises(ValueError, match="饱和/两相状态"):
+        client.enthalpy_tp_single_phase("R454C", 800_000.0, 320.0)

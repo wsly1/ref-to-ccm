@@ -127,9 +127,49 @@ class RefpropClient:
         )
 
     def enthalpy_tp(self, fluid_name: str, pressure_pa: float, temperature_k: float) -> float:
+        return self._enthalpy_tp(
+            fluid_name,
+            pressure_pa,
+            temperature_k,
+            require_single_phase=False,
+        )
+
+    def enthalpy_tp_single_phase(
+        self,
+        fluid_name: str,
+        pressure_pa: float,
+        temperature_k: float,
+    ) -> float:
+        return self._enthalpy_tp(
+            fluid_name,
+            pressure_pa,
+            temperature_k,
+            require_single_phase=True,
+        )
+
+    def _enthalpy_tp(
+        self,
+        fluid_name: str,
+        pressure_pa: float,
+        temperature_k: float,
+        *,
+        require_single_phase: bool,
+    ) -> float:
         pressure_kpa = pressure_pa / 1000.0
         flash = self.rp.TPFLSHdll(temperature_k, pressure_kpa, self.z)
         self._check(flash.ierr, flash.herr, f"calculating enthalpy for {fluid_name} at T={temperature_k} K, P={pressure_pa} Pa")
+        quality = getattr(flash, "q", None)
+        if quality is not None:
+            quality_value = float(quality)
+            if (
+                require_single_phase
+                and math.isfinite(quality_value)
+                and 0.0 <= quality_value <= 1.0
+            ):
+                raise ValueError(
+                    "阀前压力和温度对应饱和/两相状态，"
+                    "请改为单相液体或单相气体状态后再查询焓值。"
+                )
         flash_enthalpy_j_per_mol = getattr(flash, "h", None)
         if flash_enthalpy_j_per_mol is not None and math.isfinite(float(flash_enthalpy_j_per_mol)):
             molecular_weight = self.rp.WMOLdll(self.z)

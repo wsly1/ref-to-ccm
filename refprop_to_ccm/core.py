@@ -54,6 +54,9 @@ class RefrigerantInletRefpropRequest:
     outlet_enthalpy_direction: str | None
     inlet_state_mode: str = "temperature"
     inlet_enthalpy_j_per_kg: float | None = None
+    inlet_enthalpy_source_mode: str = "direct"
+    inlet_enthalpy_upstream_pressure_pa: float | None = None
+    inlet_enthalpy_upstream_temperature_c: float | None = None
     inlet_quality: float | None = None
     inlet_vapor_volume_fraction: float | None = None
 
@@ -429,10 +432,41 @@ def _resolve_refrigerant_inlet_state(
         raise ValueError("REFPROP返回的饱和气体焓值必须大于饱和液体焓值。")
 
     if state_mode == "enthalpy":
-        inlet_enthalpy = _required_finite(
-            request.inlet_enthalpy_j_per_kg,
-            "inlet_enthalpy_j_per_kg",
-        )
+        enthalpy_source_mode = str(
+            request.inlet_enthalpy_source_mode or "direct"
+        ).strip().lower()
+        if enthalpy_source_mode == "direct":
+            inlet_enthalpy = _required_finite(
+                request.inlet_enthalpy_j_per_kg,
+                "inlet_enthalpy_j_per_kg",
+            )
+        elif enthalpy_source_mode == "upstream_tp":
+            upstream_pressure_pa = _required_finite(
+                request.inlet_enthalpy_upstream_pressure_pa,
+                "inlet_enthalpy_upstream_pressure_pa",
+            )
+            if upstream_pressure_pa <= 0.0:
+                raise ValueError("阀前压力必须大于0。")
+            upstream_temperature_c = _required_finite(
+                request.inlet_enthalpy_upstream_temperature_c,
+                "inlet_enthalpy_upstream_temperature_c",
+            )
+            upstream_temperature_k = temperature_to_k(upstream_temperature_c, "C")
+            _reject_saturated_upstream_tp_state(
+                refprop=refprop,
+                fluid_name=request.fluid_name,
+                pressure_pa=upstream_pressure_pa,
+                temperature_k=upstream_temperature_k,
+            )
+            inlet_enthalpy = refprop.enthalpy_tp_single_phase(
+                request.fluid_name,
+                upstream_pressure_pa,
+                upstream_temperature_k,
+            )
+        else:
+            raise ValueError(
+                "inlet_enthalpy_source_mode must be direct or upstream_tp."
+            )
         state, quality, inlet_temperature_c = _state_from_inlet_enthalpy(
             refprop=refprop,
             fluid_name=request.fluid_name,
@@ -490,6 +524,47 @@ def _resolve_refrigerant_inlet_state(
         vapor_density_kg_per_m3=state.vapor_density_kg_per_m3,
         state_mode=state_mode,
     )
+
+
+def _reject_saturated_upstream_tp_state(
+    *,
+    refprop,
+    fluid_name: str,
+    pressure_pa: float,
+    temperature_k: float,
+) -> None:
+    try:
+        saturated_liquid = refprop.saturated_mixture_state_from_quality(
+            fluid_name,
+            pressure_pa,
+            0.0,
+        )
+        saturated_vapor = refprop.saturated_mixture_state_from_quality(
+            fluid_name,
+            pressure_pa,
+            1.0,
+        )
+    except RuntimeError:
+        # 超临界压力没有饱和温度范围，此时交给后续TP闪蒸判断状态。
+        return
+
+    lower_temperature_k = min(
+        saturated_liquid.temperature_k,
+        saturated_vapor.temperature_k,
+    )
+    upper_temperature_k = max(
+        saturated_liquid.temperature_k,
+        saturated_vapor.temperature_k,
+    )
+    if (
+        lower_temperature_k - SATURATION_TEMPERATURE_TOLERANCE_K
+        <= temperature_k
+        <= upper_temperature_k + SATURATION_TEMPERATURE_TOLERANCE_K
+    ):
+        raise ValueError(
+            "阀前压力和温度对应饱和/两相状态，"
+            "请改为单相液体或单相气体状态后再查询焓值。"
+        )
 
 
 def _state_from_inlet_enthalpy(

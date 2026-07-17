@@ -100,6 +100,54 @@ class FakeRefpropClient:
         )
 
 
+class UpstreamTpFakeRefpropClient(FakeRefpropClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.single_phase_enthalpy_queries: list[tuple[str, float, float]] = []
+
+    def enthalpy_tp(self, fluid_name: str, pressure_pa: float, temperature_k: float) -> float:
+        self.enthalpy_queries.append((fluid_name, pressure_pa, temperature_k))
+        if pressure_pa == pytest.approx(1_600_000.0) and temperature_k == pytest.approx(353.15):
+            return 350_000.0
+        if pressure_pa == pytest.approx(800_000.0) and temperature_k == pytest.approx(333.15):
+            return 400_000.0
+        raise AssertionError(
+            f"unexpected pressure and temperature: {pressure_pa}, {temperature_k}"
+        )
+
+    def enthalpy_tp_single_phase(
+        self,
+        fluid_name: str,
+        pressure_pa: float,
+        temperature_k: float,
+    ) -> float:
+        self.single_phase_enthalpy_queries.append(
+            (fluid_name, pressure_pa, temperature_k)
+        )
+        return self.enthalpy_tp(fluid_name, pressure_pa, temperature_k)
+
+    def saturated_mixture_state_from_quality(
+        self,
+        fluid_name: str,
+        pressure_pa: float,
+        quality: float,
+    ) -> SaturatedMixtureState:
+        if pressure_pa == pytest.approx(1_600_000.0):
+            return SaturatedMixtureState(
+                temperature_k=323.15 + quality * 5.0,
+                pressure_pa=pressure_pa,
+                mass_quality=quality,
+                enthalpy_j_per_kg=250_000.0 + quality * 300_000.0,
+                liquid_density_kg_per_m3=900.0,
+                vapor_density_kg_per_m3=20.0,
+            )
+        return super().saturated_mixture_state_from_quality(
+            fluid_name,
+            pressure_pa,
+            quality,
+        )
+
+
 def test_calculate_refrigerant_inlet_queries_refprop_after_entry_inputs() -> None:
     refprop = FakeRefpropClient()
     request = RefrigerantInletRefpropRequest(
@@ -129,6 +177,101 @@ def test_calculate_refrigerant_inlet_queries_refprop_after_entry_inputs() -> Non
     assert result.condition.heat_transfer_w == pytest.approx(10_000.0)
     assert result.saturation.pressure_pa == pytest.approx(800_000.0)
     assert result.liquid == _liquid_properties()
+
+
+def test_enthalpy_input_can_be_queried_from_upstream_pressure_and_temperature() -> None:
+    refprop = UpstreamTpFakeRefpropClient()
+    request = RefrigerantInletRefpropRequest(
+        fluid_name="R454C",
+        fluid_components=None,
+        saturation_type="pressure",
+        saturation_value=0.8,
+        saturation_unit="MPa",
+        solve_mode="heat_transfer",
+        heat_transfer_w=10_000.0,
+        total_mass_flow_kg_s=None,
+        layer_count=10,
+        inlet_temperature_c=None,
+        outlet_temperature_c=60.0,
+        outlet_enthalpy_direction=None,
+        inlet_state_mode="enthalpy",
+        inlet_enthalpy_source_mode="upstream_tp",
+        inlet_enthalpy_upstream_pressure_pa=1_600_000.0,
+        inlet_enthalpy_upstream_temperature_c=80.0,
+    )
+
+    result = calculate_refrigerant_inlet_from_refprop(request, refprop=refprop)
+
+    assert refprop.enthalpy_queries == [
+        ("R454C", 1_600_000.0, pytest.approx(353.15)),
+        ("R454C", 800_000.0, pytest.approx(333.15)),
+    ]
+    assert refprop.single_phase_enthalpy_queries == [
+        ("R454C", 1_600_000.0, pytest.approx(353.15)),
+    ]
+    assert result.condition.inlet_enthalpy_j_per_kg == pytest.approx(350_000.0)
+    assert result.condition.quality == pytest.approx(0.375)
+
+
+def test_upstream_pressure_and_temperature_reject_saturated_or_two_phase_state() -> None:
+    refprop = UpstreamTpFakeRefpropClient()
+    request = RefrigerantInletRefpropRequest(
+        fluid_name="R454C",
+        fluid_components=None,
+        saturation_type="pressure",
+        saturation_value=0.8,
+        saturation_unit="MPa",
+        solve_mode="heat_transfer",
+        heat_transfer_w=10_000.0,
+        total_mass_flow_kg_s=None,
+        layer_count=10,
+        inlet_temperature_c=None,
+        outlet_temperature_c=60.0,
+        outlet_enthalpy_direction=None,
+        inlet_state_mode="enthalpy",
+        inlet_enthalpy_source_mode="upstream_tp",
+        inlet_enthalpy_upstream_pressure_pa=1_600_000.0,
+        inlet_enthalpy_upstream_temperature_c=52.0,
+    )
+
+    with pytest.raises(ValueError, match="饱和/两相状态"):
+        calculate_refrigerant_inlet_from_refprop(request, refprop=refprop)
+
+    assert refprop.enthalpy_queries == []
+
+
+def test_gui_builds_upstream_tp_enthalpy_request_in_si_units() -> None:
+    def value(text: str):
+        return SimpleNamespace(get=lambda: text)
+
+    app = SimpleNamespace(
+        vars={
+            "fluid_name": value("R454C"),
+            "saturation_value": value("0.8"),
+            "refrigerant_heat_transfer_w": value("10000"),
+            "refrigerant_total_mass_flow_kg_s": value(""),
+            "refrigerant_layer_count": value("10"),
+            "refrigerant_inlet_temperature_c": value(""),
+            "refrigerant_inlet_enthalpy_j_per_kg": value(""),
+            "refrigerant_inlet_enthalpy_upstream_pressure_mpa": value("1.6"),
+            "refrigerant_inlet_enthalpy_upstream_temperature_c": value("80"),
+            "refrigerant_inlet_quality": value(""),
+            "refrigerant_inlet_vapor_volume_fraction_input": value(""),
+            "refrigerant_outlet_temperature_c": value("60"),
+        },
+        saturation_type=value("pressure"),
+        refrigerant_inlet_solve_mode=value("heat_transfer"),
+        refrigerant_inlet_state_mode=value("enthalpy"),
+        refrigerant_inlet_enthalpy_source_mode=value("upstream_tp"),
+        refrigerant_outlet_enthalpy_direction=value("decrease"),
+    )
+
+    request = RefpropToCcmApp._build_refrigerant_inlet_refprop_request(app)
+
+    assert request.inlet_enthalpy_source_mode == "upstream_tp"
+    assert request.inlet_enthalpy_upstream_pressure_pa == pytest.approx(1_600_000.0)
+    assert request.inlet_enthalpy_upstream_temperature_c == pytest.approx(80.0)
+    assert request.inlet_enthalpy_j_per_kg is None
 
 
 @pytest.mark.parametrize(

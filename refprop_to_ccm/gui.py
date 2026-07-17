@@ -165,6 +165,7 @@ class RefpropToCcmApp(tk.Tk):
         self.liquid_property_mode = tk.StringVar(value="saturation")
         self.refrigerant_inlet_solve_mode = tk.StringVar(value="heat_transfer")
         self.refrigerant_inlet_state_mode = tk.StringVar(value="temperature")
+        self.refrigerant_inlet_enthalpy_source_mode = tk.StringVar(value="direct")
         self.refrigerant_outlet_enthalpy_direction = tk.StringVar(value="decrease")
         self.run_star = tk.BooleanVar(value=False)
         self.star_apply_source_type = tk.StringVar(value="refprop")
@@ -184,6 +185,8 @@ class RefpropToCcmApp(tk.Tk):
         self.star_apply_output_sim_widgets: list[tk.Widget] = []
         self.refprop_phase_name_widgets: list[tk.Widget] = []
         self.refrigerant_inlet_state_widgets: dict[str, list[tk.Widget]] = {}
+        self.refrigerant_inlet_enthalpy_direct_widgets: list[tk.Widget] = []
+        self.refrigerant_inlet_enthalpy_upstream_widgets: list[tk.Widget] = []
         self.star_apply_status_var = tk.StringVar(value="等待输入")
         self.update_status_var = tk.StringVar(value=f"当前版本: {__version__}")
         self._update_check_running = False
@@ -244,6 +247,8 @@ class RefpropToCcmApp(tk.Tk):
             "refrigerant_layer_count": tk.StringVar(value="18"),
             "refrigerant_inlet_temperature_c": tk.StringVar(value="98"),
             "refrigerant_inlet_enthalpy_j_per_kg": tk.StringVar(value=""),
+            "refrigerant_inlet_enthalpy_upstream_pressure_mpa": tk.StringVar(value=""),
+            "refrigerant_inlet_enthalpy_upstream_temperature_c": tk.StringVar(value=""),
             "refrigerant_inlet_quality": tk.StringVar(value=""),
             "refrigerant_inlet_vapor_volume_fraction_input": tk.StringVar(value=""),
             "refrigerant_outlet_temperature_c": tk.StringVar(value="57"),
@@ -903,30 +908,74 @@ class RefpropToCcmApp(tk.Tk):
             "refrigerant_inlet_temperature_c",
             "单相液体或气体可使用此方式",
         )
-        self.refrigerant_inlet_state_widgets["enthalpy"] = self._entry(
+
+        enthalpy_source_row = ttk.Frame(inlet_frame)
+        enthalpy_source_row.grid(row=5, column=0, columnspan=3, sticky="ew", pady=6)
+        enthalpy_source_label = ttk.Label(enthalpy_source_row, text="入口焓值来源")
+        enthalpy_source_label.pack(side="left", padx=(0, 12))
+        enthalpy_source_direct = ttk.Radiobutton(
+            enthalpy_source_row,
+            text="直接输入焓值",
+            value="direct",
+            variable=self.refrigerant_inlet_enthalpy_source_mode,
+            command=self._sync_refrigerant_inlet_mode_state,
+        )
+        enthalpy_source_direct.pack(side="left", padx=(0, 18))
+        enthalpy_source_upstream = ttk.Radiobutton(
+            enthalpy_source_row,
+            text="由阀前压力和温度查询焓值",
+            value="upstream_tp",
+            variable=self.refrigerant_inlet_enthalpy_source_mode,
+            command=self._sync_refrigerant_inlet_mode_state,
+        )
+        enthalpy_source_upstream.pack(side="left")
+        self.refrigerant_inlet_state_widgets["enthalpy"] = [
+            enthalpy_source_label,
+            enthalpy_source_direct,
+            enthalpy_source_upstream,
+        ]
+
+        self.refrigerant_inlet_enthalpy_direct_widgets = self._entry(
             inlet_frame,
-            5,
+            6,
             "制冷剂入口焓值 J/kg",
             "refrigerant_inlet_enthalpy_j_per_kg",
-            "与当前饱和压力一起查询REFPROP",
+            "直接输入入口焓值",
+        )
+        upstream_pressure_widgets = self._entry(
+            inlet_frame,
+            7,
+            "阀前压力 MPa",
+            "refrigerant_inlet_enthalpy_upstream_pressure_mpa",
+            "与阀前温度一起查询REFPROP焓值",
+        )
+        upstream_temperature_widgets = self._entry(
+            inlet_frame,
+            8,
+            "阀前温度 C",
+            "refrigerant_inlet_enthalpy_upstream_temperature_c",
+            "不能输入饱和/两相状态，必须是单相状态",
+        )
+        self.refrigerant_inlet_enthalpy_upstream_widgets = (
+            upstream_pressure_widgets + upstream_temperature_widgets
         )
         self.refrigerant_inlet_state_widgets["quality"] = self._entry(
             inlet_frame,
-            6,
+            9,
             "制冷剂入口干度",
             "refrigerant_inlet_quality",
             "质量含气率",
         )
         self.refrigerant_inlet_state_widgets["vapor_volume_fraction"] = self._entry(
             inlet_frame,
-            7,
+            10,
             "制冷剂入口气体体积分数",
             "refrigerant_inlet_vapor_volume_fraction_input",
             "作为入口状态直接输入",
         )
 
         solve_row = ttk.Frame(inlet_frame)
-        solve_row.grid(row=8, column=0, columnspan=3, sticky="ew", pady=6)
+        solve_row.grid(row=11, column=0, columnspan=3, sticky="ew", pady=6)
         ttk.Label(solve_row, text="计算方式").pack(side="left", padx=(0, 12))
         ttk.Radiobutton(
             solve_row,
@@ -951,34 +1000,34 @@ class RefpropToCcmApp(tk.Tk):
         ).pack(side="left")
         self.refrigerant_heat_transfer_widgets = self._entry(
             inlet_frame,
-            9,
+            12,
             "制冷剂换热量 W",
             "refrigerant_heat_transfer_w",
             "默认按参考表F12=13.885 kW",
         )
         self.refrigerant_mass_flow_widgets = self._entry(
             inlet_frame,
-            10,
+            13,
             "制冷剂总质量流量 kg/s",
             "refrigerant_total_mass_flow_kg_s",
             "用于反算换热量",
         )
         self._entry(
             inlet_frame,
-            11,
+            14,
             "制冷剂层数",
             "refrigerant_layer_count",
             "用于总流量除以层数得到单层质量流量",
         )
         self.refrigerant_outlet_temperature_widgets = self._entry(
             inlet_frame,
-            12,
+            15,
             "制冷剂出口温度 C",
             "refrigerant_outlet_temperature_c",
             "按当前饱和压力和出口温度查询REFPROP出口焓",
         )
         direction_row = ttk.Frame(inlet_frame)
-        direction_row.grid(row=13, column=0, columnspan=3, sticky="ew", pady=6)
+        direction_row.grid(row=16, column=0, columnspan=3, sticky="ew", pady=6)
         direction_label = ttk.Label(direction_row, text="出口焓方向")
         direction_label.pack(side="left", padx=(0, 12))
         direction_increase = ttk.Radiobutton(
@@ -1011,10 +1060,10 @@ class RefpropToCcmApp(tk.Tk):
             ),
             foreground="#666",
             wraplength=820,
-        ).grid(row=14, column=0, columnspan=3, sticky="w", pady=(2, 6))
+        ).grid(row=17, column=0, columnspan=3, sticky="w", pady=(2, 6))
 
         summary_frame = ttk.LabelFrame(inlet_frame, text="入口参数汇总", padding=8)
-        summary_frame.grid(row=15, column=0, columnspan=3, sticky="nsew", pady=(2, 6))
+        summary_frame.grid(row=18, column=0, columnspan=3, sticky="nsew", pady=(2, 6))
         summary_frame.columnconfigure(0, weight=1)
         summary_frame.rowconfigure(0, weight=1)
         self.inlet_parameter_summary = tk.Text(
@@ -1034,7 +1083,7 @@ class RefpropToCcmApp(tk.Tk):
         self._refresh_inlet_parameter_summary()
 
         calculation_actions = ttk.Frame(inlet_frame)
-        calculation_actions.grid(row=16, column=0, columnspan=3, sticky="w", pady=(4, 0))
+        calculation_actions.grid(row=19, column=0, columnspan=3, sticky="w", pady=(4, 0))
         ttk.Button(
             calculation_actions,
             text="计算入口条件",
@@ -1713,6 +1762,10 @@ class RefpropToCcmApp(tk.Tk):
         self.refrigerant_phase_mode.trace_add("write", lambda *_: self._sync_refrigerant_phase_mode_state())
         self.refrigerant_inlet_solve_mode.trace_add("write", lambda *_: self._sync_refrigerant_inlet_mode_state())
         self.refrigerant_inlet_state_mode.trace_add("write", lambda *_: self._sync_refrigerant_inlet_mode_state())
+        self.refrigerant_inlet_enthalpy_source_mode.trace_add(
+            "write",
+            lambda *_: self._sync_refrigerant_inlet_mode_state(),
+        )
         for key in (
             "fluid_name",
             "saturation_value",
@@ -1721,6 +1774,8 @@ class RefpropToCcmApp(tk.Tk):
             "refrigerant_layer_count",
             "refrigerant_inlet_temperature_c",
             "refrigerant_inlet_enthalpy_j_per_kg",
+            "refrigerant_inlet_enthalpy_upstream_pressure_mpa",
+            "refrigerant_inlet_enthalpy_upstream_temperature_c",
             "refrigerant_inlet_quality",
             "refrigerant_inlet_vapor_volume_fraction_input",
             "refrigerant_outlet_temperature_c",
@@ -1734,6 +1789,10 @@ class RefpropToCcmApp(tk.Tk):
             lambda *_: self._invalidate_refrigerant_inlet_summary(),
         )
         self.refrigerant_inlet_state_mode.trace_add(
+            "write",
+            lambda *_: self._invalidate_refrigerant_inlet_summary(),
+        )
+        self.refrigerant_inlet_enthalpy_source_mode.trace_add(
             "write",
             lambda *_: self._invalidate_refrigerant_inlet_summary(),
         )
@@ -1826,6 +1885,23 @@ class RefpropToCcmApp(tk.Tk):
             self.refrigerant_inlet_state_mode.set(inlet_state_mode)
         for state_mode, widgets in self.refrigerant_inlet_state_widgets.items():
             enabled = state_mode == inlet_state_mode
+            for widget in widgets:
+                if isinstance(widget, ttk.Label):
+                    widget.configure(foreground="#000" if enabled else "#777")
+                else:
+                    widget.configure(state="normal" if enabled else "disabled")
+
+        enthalpy_source_mode = self.refrigerant_inlet_enthalpy_source_mode.get()
+        if enthalpy_source_mode not in {"direct", "upstream_tp"}:
+            enthalpy_source_mode = "direct"
+            self.refrigerant_inlet_enthalpy_source_mode.set(enthalpy_source_mode)
+        enthalpy_enabled = inlet_state_mode == "enthalpy"
+        direct_enabled = enthalpy_enabled and enthalpy_source_mode == "direct"
+        upstream_enabled = enthalpy_enabled and enthalpy_source_mode == "upstream_tp"
+        for widgets, enabled in (
+            (self.refrigerant_inlet_enthalpy_direct_widgets, direct_enabled),
+            (self.refrigerant_inlet_enthalpy_upstream_widgets, upstream_enabled),
+        ):
             for widget in widgets:
                 if isinstance(widget, ttk.Label):
                     widget.configure(foreground="#000" if enabled else "#777")
@@ -2329,6 +2405,9 @@ class RefpropToCcmApp(tk.Tk):
             raise ValueError("请选择制冷剂入口状态定义方式。")
         inlet_temperature_c = None
         inlet_enthalpy_j_per_kg = None
+        inlet_enthalpy_source_mode = "direct"
+        inlet_enthalpy_upstream_pressure_pa = None
+        inlet_enthalpy_upstream_temperature_c = None
         inlet_quality = None
         inlet_vapor_volume_fraction = None
         if inlet_state_mode == "temperature":
@@ -2337,10 +2416,32 @@ class RefpropToCcmApp(tk.Tk):
                 "制冷剂入口温度",
             )
         elif inlet_state_mode == "enthalpy":
-            inlet_enthalpy_j_per_kg = _float_value(
-                self.vars["refrigerant_inlet_enthalpy_j_per_kg"].get(),
-                "制冷剂入口焓值",
+            inlet_enthalpy_source_mode = (
+                self.refrigerant_inlet_enthalpy_source_mode.get().strip().lower()
             )
+            if inlet_enthalpy_source_mode == "direct":
+                inlet_enthalpy_j_per_kg = _float_value(
+                    self.vars["refrigerant_inlet_enthalpy_j_per_kg"].get(),
+                    "制冷剂入口焓值",
+                )
+            elif inlet_enthalpy_source_mode == "upstream_tp":
+                upstream_pressure_mpa = _float_value(
+                    self.vars[
+                        "refrigerant_inlet_enthalpy_upstream_pressure_mpa"
+                    ].get(),
+                    "阀前压力",
+                )
+                if upstream_pressure_mpa <= 0.0:
+                    raise ValueError("阀前压力必须大于0。")
+                inlet_enthalpy_upstream_pressure_pa = upstream_pressure_mpa * 1.0e6
+                inlet_enthalpy_upstream_temperature_c = _float_value(
+                    self.vars[
+                        "refrigerant_inlet_enthalpy_upstream_temperature_c"
+                    ].get(),
+                    "阀前温度",
+                )
+            else:
+                raise ValueError("请选择入口焓值来源。")
         elif inlet_state_mode == "quality":
             inlet_quality = _float_value(
                 self.vars["refrigerant_inlet_quality"].get(),
@@ -2377,6 +2478,9 @@ class RefpropToCcmApp(tk.Tk):
             outlet_enthalpy_direction=outlet_enthalpy_direction,
             inlet_state_mode=inlet_state_mode,
             inlet_enthalpy_j_per_kg=inlet_enthalpy_j_per_kg,
+            inlet_enthalpy_source_mode=inlet_enthalpy_source_mode,
+            inlet_enthalpy_upstream_pressure_pa=inlet_enthalpy_upstream_pressure_pa,
+            inlet_enthalpy_upstream_temperature_c=inlet_enthalpy_upstream_temperature_c,
             inlet_quality=inlet_quality,
             inlet_vapor_volume_fraction=inlet_vapor_volume_fraction,
         )
@@ -2774,6 +2878,9 @@ class RefpropToCcmApp(tk.Tk):
             "refrigerant_phase_mode": self.refrigerant_phase_mode.get(),
             "refrigerant_inlet_solve_mode": self.refrigerant_inlet_solve_mode.get(),
             "refrigerant_inlet_state_mode": self.refrigerant_inlet_state_mode.get(),
+            "refrigerant_inlet_enthalpy_source_mode": (
+                self.refrigerant_inlet_enthalpy_source_mode.get()
+            ),
             "refrigerant_outlet_enthalpy_direction": self.refrigerant_outlet_enthalpy_direction.get(),
             "liquid_property_mode": self.liquid_property_mode.get(),
             "run_star": self.run_star.get(),
@@ -2813,6 +2920,13 @@ class RefpropToCcmApp(tk.Tk):
             "vapor_volume_fraction",
         }:
             self.refrigerant_inlet_state_mode.set(str(data["refrigerant_inlet_state_mode"]))
+        if data.get("refrigerant_inlet_enthalpy_source_mode") in {
+            "direct",
+            "upstream_tp",
+        }:
+            self.refrigerant_inlet_enthalpy_source_mode.set(
+                str(data["refrigerant_inlet_enthalpy_source_mode"])
+            )
         if data.get("refrigerant_outlet_enthalpy_direction") in {"increase", "decrease"}:
             self.refrigerant_outlet_enthalpy_direction.set(
                 str(data["refrigerant_outlet_enthalpy_direction"])
